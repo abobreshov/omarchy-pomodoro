@@ -14,10 +14,10 @@ import "Timer.js" as TimerLib
 // the time in the tooltip.
 BarWidget {
   id: root
-  moduleName: "abobreshov.pomodoro"
+  moduleName: TimerLib.TARGET
 
-  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("abobreshov.pomodoro") : null
-  readonly property var view: service ? service.view : TimerLib.view(TimerLib.initialState(), TimerLib.settings({}))
+  readonly property var service: bar && bar.shell ? bar.shell.serviceFor(TimerLib.TARGET) : null
+  readonly property var view: service ? service.view : TimerLib.idleView()
   readonly property var cfg: service ? service.cfg : TimerLib.settings({})
 
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
@@ -33,30 +33,27 @@ BarWidget {
     if (root.view.playing) return Util.alpha(root.phaseColor, 0.18)
     return Util.alpha(root.contentForeground, 0.10)
   }
-  readonly property real pillOpacity: root.vertical
-    ? (root.view.playing ? 1.0 : 0.7)
-    : (root.view.hasSession ? 1.0 : 0.7)
-
   readonly property var layout: TimerLib.pillLayout(root.vertical, {
     barSize: root.barSize, iconSlot: Style.bar.iconSlot, pillWidth: Style.space(56)
-  })
+  }, root.view)
 
   implicitWidth: root.layout.width
   implicitHeight: root.layout.height
-  opacity: root.pillOpacity
+  opacity: root.layout.opacity
 
-  // ---- Service binding: register for open/close relays, hand over settings.
+  // ---- Service binding: register for the open/close relays and hand the
+  //      service to the popup. Settings reach the service through the
+  //      shell's bar config, not through this widget.
   function bindService() {
     if (!root.service) return
     root.service.registerWidget(root)
-    root.service.applySettings(root.settings)
   }
 
-  onServiceChanged: root.bindService()
-  onSettingsChanged: {
-    if (root.service) root.service.applySettings(root.settings)
+  onServiceChanged: {
+    root.bindService()
     root.injectPanel()
   }
+  onSettingsChanged: root.injectPanel()
   onBarChanged: root.injectPanel()
   Component.onDestruction: if (root.service) root.service.unregisterWidget(root)
 
@@ -80,6 +77,7 @@ BarWidget {
     if ("settings" in target) target.settings = root.settings
     if ("anchorItem" in target) target.anchorItem = barItem
     if ("hostWidget" in target) target.hostWidget = root
+    if ("service" in target) target.service = root.service
   }
 
   Loader {

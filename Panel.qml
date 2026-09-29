@@ -15,8 +15,8 @@ import "Timer.js" as TimerLib
 // switches panels, Esc closes. Every action goes to the service.
 Panel {
   id: root
-  moduleName: "abobreshov.pomodoro"
-  ipcTarget: "abobreshov.pomodoro"
+  moduleName: TimerLib.TARGET
+  ipcTarget: TimerLib.TARGET
   manageIpc: false   // Service.qml owns the single IpcHandler for this target
 
   property var anchorItem: null
@@ -26,8 +26,9 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("abobreshov.pomodoro") : null
-  readonly property var view: service ? service.view : TimerLib.view(TimerLib.initialState(), TimerLib.settings({}))
+  // The hosting widget hands the service over (the shell's own panel idiom).
+  property var service: null
+  readonly property var view: service ? service.view : TimerLib.idleView()
   readonly property var cfg: service ? service.cfg : TimerLib.settings({})
 
   readonly property color contentForeground: bar ? bar.foreground : Color.foreground
@@ -36,7 +37,7 @@ Panel {
   readonly property color breakColor: root.cfg.breakColor
   readonly property color phaseColor: root.view.isBreak ? root.breakColor : Color.accent
 
-  readonly property string playIcon: root.view.playing ? "" : "" // fa-pause / fa-play
+  readonly property string playIcon: root.view.playing ? "\uf04c" : "\uf04b" // fa-pause / fa-play
   readonly property string playTooltip: {
     if (root.view.playing) return "Pause (Space)"
     return root.view.hasSession ? "Start (Space)" : "Start pomodoro (Space)"
@@ -138,7 +139,7 @@ Panel {
 
           Text {
             Layout.alignment: Qt.AlignVCenter
-            text: "\u{F04FE}" // md-target
+            text: "󰓾" // md-target (outside the BMP: written raw, as upstream writes the coffee glyph)
             textFormat: Text.PlainText
             color: root.contentForeground
             font.family: root.contentFontFamily
@@ -159,7 +160,7 @@ Panel {
 
           PanelActionButton {
             Layout.alignment: Qt.AlignVCenter
-            iconText: "\u{F0156}" // md-close
+            iconText: "󰅖" // md-close
             tooltipText: "Detach task (x)"
             size: Style.space(24)
             foreground: root.contentForeground
@@ -235,7 +236,7 @@ Panel {
           Item { Layout.fillWidth: true }
 
           PanelActionButton {
-            iconText: "" // fa-step-forward
+            iconText: "\uf051" // fa-step-forward
             tooltipText: "Skip phase (S)"
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily
@@ -254,7 +255,7 @@ Panel {
           }
 
           PanelActionButton {
-            iconText: "" // fa-undo
+            iconText: "\uf0e2" // fa-undo
             tooltipText: "Reset phase (R)"
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily

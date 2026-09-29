@@ -50,8 +50,11 @@ back and add it again before releasing.
 
 ## Settings
 
-Settings live in the widget's entry in `~/.config/omarchy/shell.json`. Set
-them with `omarchy bar set abobreshov.pomodoro <key> <value>`:
+Settings live in the widget's entry in `~/.config/omarchy/shell.json`. The
+service reads that entry out of the bar configuration the shell injects
+(`shell.barConfig`, refreshed on every change), so the settings are known
+before any pill exists. Set them with
+`omarchy bar set abobreshov.pomodoro <key> <value>`:
 
 | Key | Default | What it does |
 |---|---|---|
@@ -62,7 +65,7 @@ them with `omarchy bar set abobreshov.pomodoro <key> <value>`:
 | `sound` | `true` | `false` silences the phase-end sounds |
 | `breakColor` | `"#a6e3a1"` | Color used for the break pill (catppuccin green) |
 | `backend` | `"none"` | `"cli"` records every work phase through `todocli pomodoro start / done / cancel / retarget / interrupt`. Any other value means `none`. |
-| `cliPath` | `"todocli"` | Command name or absolute path, run as a plain argv process (never a shell). The default resolves on the shell's PATH, which contains `~/.cargo/bin` on a default Omarchy install; elsewhere set the absolute path, for example `/home/you/.cargo/bin/todocli` (QML does not expand `~`). |
+| `cliPath` | `"todocli"` | Command name or absolute path, run as a plain argv process (never a shell) behind `/usr/bin/env --`, so a value starting with `-` is still a program name. The default resolves on the shell's PATH, which contains `~/.cargo/bin` on a default Omarchy install; elsewhere set the absolute path, for example `/home/you/.cargo/bin/todocli` (QML does not expand `~`). Residual: a value containing `=` is read by `env` as a variable assignment, so keep `=` out of the path. |
 | `todoTarget` | `"abobreshov.todo"` | IPC target opened when a work-end notification is clicked |
 
 Numbers need `--json`, or they land in `shell.json` as strings (the plugin
@@ -115,17 +118,22 @@ toggles.
   `running ? max(0, endsAt - now) : remaining` and treat
   `running && now > endsAt + 10 s` as idle.
 - **Restore after a reload.** When the service starts (shell restart, crash,
-  or a development hot reload) it reads the state file. A phase no older
-  than `remaining + 60 s` comes back **paused** with its task, session and
+  or a development hot reload) it makes the state directory private and
+  reads the state file, then restores. A phase no older than
+  `remaining + 60 s` comes back **paused** with its task, session and
   checkpointed focus seconds; the popup says `Restored after a reload ·
   Space resumes` until you resume, skip or the phase changes. An older state
   with an open session is closed as `interrupted` with its checkpoint and
-  the timer starts idle.
+  the timer starts idle. Should an IPC call land in the few milliseconds
+  before that read (the target registers after 100 ms), the live timer wins
+  and only the pomodoro count, a pending close and the saved session's
+  `interrupt` are taken from the file.
 
 ## Recording (`backend = cli`)
 
-Every work phase is one `todocli` pomodoro session (see
-[abobreshov/productivity](https://github.com/abobreshov/productivity)):
+Every work phase is one `todocli` pomodoro session (`todocli` is the CLI of
+the `productivity` monorepo this fork is developed in; a public repository
+is planned, not published yet):
 
 | Timer event | `todocli --source omarchy --json pomodoro …` |
 |---|---|
@@ -152,9 +160,10 @@ found`, `database busy` or `todocli error`; the same text is in
 - a re-send answered with an error is dropped (the reason stays visible), and
   the next work phase starts cleanly.
 
-`todocli` runs as an argv list through `/usr/bin/env <cliPath> …`, so a
-missing binary exits 127 without any shell. Commands wait in a queue, one at
-a time, in the order the timer produced them.
+`todocli` runs as an argv list through `/usr/bin/env -- <cliPath> …`, so a
+missing binary exits 127 without any shell and a `cliPath` starting with
+`-` is never an `env` option. Commands wait in a queue, one at a time, in
+the order the timer produced them.
 
 ## Data
 
@@ -179,8 +188,11 @@ restore paths. It never touches the running shell or your state.
 `Timer.js` is a `.pragma library` file holding all of the logic (phases,
 deadline, suspend, recording queue, restore, notification argv, view
 strings); `test/qml-js-loader.mjs` runs it under Node with a small `vm`
-loader, and `test/fakebin/todocli` stands in for the real CLI in the
-recording tests.
+loader that hides Node's own globals (`process`, `Buffer`, timers, `fetch`,
+`require`) so a call that would not exist in QML fails the tests;
+`test/harness.mjs` drives the reducer and checks after every event that it
+left its input state untouched; `test/fakebin/todocli` stands in for the
+real CLI in the recording tests.
 
 ## License
 
@@ -198,3 +210,11 @@ MIT. Upstream copyright (c) 2026 markbus-ai; modifications copyright (c)
 | New IPC: `start`, `pause`, `startFor`, `detach`, `skip`, `reset`, `status` | Scripts and the todo panel drive and read the timer |
 | Vertical bars: glyph only, one icon slot high | Upstream's 56 px pill overflows a 28 px vertical bar |
 | `license` key in the manifest | Upstream's manifest had none; the LICENSE file says MIT |
+| `Layout.alignment: Qt.AlignVCenter` on the popup's phase-row texts instead of `anchors.verticalCenter` | Anchors on `RowLayout` children are undefined behaviour in Qt and warn at runtime |
+
+### Not implemented
+
+- UX 5.2's 4 s transient `Closed the pomodoro started from claude (#7, 12m).`
+  when a `start --interrupt` closes a session another surface left running:
+  the session object `todocli pomodoro start --json` prints has no field for
+  the closed session, so the plugin cannot know it happened.

@@ -22,17 +22,20 @@ Item {
   property string omarchyPath: ""
   property var manifest: null
 
-  readonly property string target: "abobreshov.pomodoro"
+  readonly property string target: TimerLib.TARGET
   readonly property string home: Quickshell.env("HOME")
-  readonly property string stateDir: root.home + "/.local/state/abobreshov.pomodoro"
+  readonly property string stateDir: root.home + "/.local/state/" + TimerLib.TARGET
   readonly property string statePath: root.stateDir + "/state.json"
   readonly property string notifyPath: root.omarchyPath !== ""
     ? root.omarchyPath
     : (Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy")
 
-  // Settings arrive from the bar widgets (they hold the shell.json entry);
-  // every key is coerced in Timer.settings.
-  property var rawSettings: ({})
+  // Settings are the widget's shell.json entry, read out of the bar config
+  // the shell injects (refreshed on every shell.json change), so they are
+  // known before any widget exists and the restore never waits for one.
+  // Every key is coerced in Timer.settings.
+  readonly property var rawSettings: TimerLib.widgetSettings(root.shell ? root.shell.barConfig : null, root.target)
+  readonly property bool settingsKnown: root.shell !== null
   readonly property var cfg: {
     var c = TimerLib.settings(root.rawSettings)
     c.omarchyPath = root.notifyPath
@@ -42,15 +45,12 @@ Item {
   // The machine state, replaced wholesale on every event so bindings refresh.
   property var timerState: TimerLib.initialState()
   readonly property var view: TimerLib.view(root.timerState, root.cfg)
-  readonly property bool ready: root.restoredOnce
 
   property bool ipcReady: false
   property bool stateLoaded: false
-  property bool settingsApplied: false
   property bool restoredOnce: false
-  property var savedState: null
+  property string stateText: ""
   property var widgets: []
-  property var inflight: null
 
   // ---------------------------------------------------------- dispatch
 
@@ -73,14 +73,6 @@ Item {
   function resetPhase() { root.dispatch({ type: "reset" }) }
   function skipPhase() { root.dispatch({ type: "skip" }) }
   function detachTask() { root.dispatch({ type: "detach" }) }
-
-  // ---------------------------------------------------------- settings
-
-  function applySettings(raw) {
-    root.rawSettings = raw && typeof raw === "object" ? raw : {}
-    root.settingsApplied = true
-    Qt.callLater(root.restoreWhenReady)
-  }
 
   // ----------------------------------------------------------- widgets
 
@@ -107,10 +99,10 @@ Item {
 
   // --------------------------------------------------------- recording
 
-  // One todocli process at a time; Timer.js queues the rest and hands the
-  // next one over only after this reply was applied (PLAN §7.6).
+  // One todocli process at a time; Timer.js queues the rest, keeps the one
+  // in flight as `timerState.inflight` and hands the next one over only
+  // after this reply was applied (PLAN §7.6).
   function startRecord(action) {
-    root.inflight = action
     recordProc.command = TimerLib.recordArgv(root.cfg.cliPath, action)
     recordProc.running = true
   }
@@ -122,8 +114,7 @@ Item {
     onStarted: recordWatchdog.restart()
     onExited: function(exitCode, exitStatus) {
       recordWatchdog.stop()
-      var action = root.inflight
-      root.inflight = null
+      var action = root.timerState.inflight
       if (!action) return
       root.dispatch({ type: "recordResult", id: action.id, exitCode: exitCode, exitStatus: exitStatus,
                       stdout: recordOut.text, stderr: recordErr.text })
@@ -141,10 +132,25 @@ Item {
 
   // The directory is private (0700): the file holds task titles. `install -d
   // -m` sets the mode on an existing directory too, in one argv, no shell.
+  // The file is read as soon as the path resolves (a read needs no
+  // directory); the restore waits for `install -d` to have exited
+  // (`dirChecked`), and every write also needs its exit 0 (`dirReady`), so
+  // nothing is ever written into a directory that is not private and no save
+  // can clobber the file the restore is about to read. In Quickshell 0.3.1
+  // `preload: false` + `reload()` delivers no `loaded`/`loadFailed`, hence
+  // the default preload here.
+  property bool dirChecked: false
+  property bool dirReady: false
+
   Process {
     id: ensureDirProc
     command: ["install", "-d", "-m", "0700", root.stateDir]
-    onExited: stateFile.reload()
+    onExited: function(exitCode, exitStatus) {
+      root.dirReady = exitCode === 0
+      root.dirChecked = true
+      if (!root.dirReady) console.warn(root.target + ": install -d exited " + exitCode + "; state file disabled")
+      root.restoreWhenReady()
+    }
   }
 
   FileView {
@@ -155,40 +161,37 @@ Item {
     printErrors: false
     onLoaded: root.onStateRead(text())
     onLoadFailed: root.onStateRead("")
+    onSaveFailed: function(error) {
+      console.warn(root.target + ": state save failed: " + FileViewError.toString(error))
+    }
   }
 
+  // `loaded` can fire more than once at startup; the first read wins.
   function onStateRead(text) {
     if (root.stateLoaded) return
     root.stateLoaded = true
-    root.savedState = TimerLib.parseStateFile(text)
-    Qt.callLater(root.restoreWhenReady)
+    root.stateText = text
+    root.restoreWhenReady()
   }
 
-  // Never write before the first read: a save in the gap would clobber the
-  // file the restore is about to read.
   function saveState(doc) {
-    if (!root.stateLoaded) return
+    if (!root.stateLoaded || !root.dirReady) return
     stateFile.setText(JSON.stringify(doc, null, 2) + "\n")
   }
 
-  // Restore once the file was read and the widgets delivered the settings
-  // (a stale state records an interrupt only with backend = cli); without a
-  // widget the grace timer lets the defaults through.
+  // Restore once the file was read and the directory checked. Timer.serviceStart
+  // replies `deferred` while a stale session cannot be closed yet because the
+  // settings are unknown (no shell injected); the text is kept and the
+  // restore runs again when the shell arrives.
   function restoreWhenReady() {
-    if (root.restoredOnce || !root.stateLoaded) return
-    if (!root.settingsApplied && settingsGrace.running) return
+    if (root.restoredOnce || !root.stateLoaded || !root.dirChecked) return
+    var reply = root.dispatch({ type: "serviceStart", text: root.stateText, settingsKnown: root.settingsKnown })
+    if (reply === "deferred") return
     root.restoredOnce = true
-    var saved = root.savedState
-    root.savedState = null
-    root.dispatch({ type: "serviceStart", saved: saved })
+    root.stateText = ""
   }
 
-  Timer {
-    id: settingsGrace
-    interval: 3000
-    running: true
-    onTriggered: root.restoreWhenReady()
-  }
+  onShellChanged: root.restoreWhenReady()
 
   Component.onCompleted: ensureDirProc.running = true
 

@@ -6,7 +6,9 @@
 // `reduce(state, event, now, cfg) -> { state, effects, reply }`. Nothing here
 // touches QML, the file system or a process: every side effect comes back as
 // an effect object the service runs (`record`, `writeState`, `notify`,
-// `sound`), so the whole machine is unit-tested under Node (test/).
+// `sound`), so the whole machine is unit-tested under Node (test/). The
+// reducer never changes the state it was given: it works on a shallow copy
+// and copies every queued record action it fills in.
 //
 // Phases and their transitions are upstream's (markbus-ai/omarchy-pomodoro):
 // idle → work → short or long break → work (paused) …; skip moves on without
@@ -23,8 +25,8 @@ var RESTORE_GRACE_MS = 60000
 var LABEL_MAX = 120
 var TASK_ID_MAX = 64
 var UNLINKED_LABEL = "Pomodoro"
-var GLYPH_WORK = ""   // fa-stopwatch (upstream)
-var GLYPH_BREAK = "\u{F0176}" // md-coffee (upstream)
+var GLYPH_WORK = ""   // fa-stopwatch (upstream's escape)
+var GLYPH_BREAK = "󰅶"        // md-coffee (upstream writes it raw: outside the BMP)
 var SOUND_WORK_END = "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"
 var SOUND_BREAK_END = "/usr/share/sounds/freedesktop/stereo/complete.oga"
 var DEFAULT_OMARCHY_PATH = "/usr/share/omarchy"
@@ -32,6 +34,10 @@ var ERR_MISSING = "todocli not found"
 var ERR_BUSY = "database busy"
 var ERR_FAILED = "todocli error"
 var CLOSE_VERBS = { done: true, cancel: true, retarget: true, interrupt: true }
+// Every successful close clears the caption; a successful `start` keeps it so
+// the caption can still name the lost phase (AC-6.22). UX 5.2 says "after the
+// next successful record"; this reads it as the next successful close.
+var CLEARS_RECORD_ERROR = CLOSE_VERBS
 
 var DEFAULTS = {
   workMinutes: 25,
@@ -70,6 +76,29 @@ function settings(raw) {
     cliPath: str("cliPath"),
     todoTarget: str("todoTarget")
   }
+}
+
+// The widget's shell.json entry, minus `id`, out of the bar config the shell
+// injects into the service (`shell.barConfig`; refreshed on every shell.json
+// change): the same object the bar hands its widgets as `settings`, available
+// before any widget exists. `null` when the widget is not in the layout.
+function widgetSettings(barConfig, id) {
+  var layout = barConfig && typeof barConfig === "object" ? barConfig.layout : null
+  if (!layout || typeof layout !== "object") return null
+  var sections = ["left", "center", "right"]
+  for (var i = 0; i < sections.length; i++) {
+    var entries = layout[sections[i]]
+    if (!Array.isArray(entries)) continue
+    for (var j = 0; j < entries.length; j++) {
+      var e = entries[j]
+      if (e === id) return {}
+      if (!e || typeof e !== "object" || e.id !== id) continue
+      var out = {}
+      for (var k in e) if (k !== "id") out[k] = e[k]
+      return out
+    }
+  }
+  return null
 }
 
 // Controls (C0, DEL, C1) become spaces; trimmed; at most 120 characters.
@@ -121,6 +150,8 @@ function initialState() {
   }
 }
 
+// Shallow: nested objects are never written in place (queue and inflight
+// actions are copied when filled in; the rest is replaced wholesale).
 function clone(state) {
   var next = {}
   for (var k in state) next[k] = state[k]
@@ -208,11 +239,12 @@ function taskArgs(action) {
   return ["--label=" + (action.label || UNLINKED_LABEL)]
 }
 
-// `/usr/bin/env` in front: Quickshell 0.3.1 never emits `exited` for a
+// `/usr/bin/env --` in front: Quickshell 0.3.1 never emits `exited` for a
 // binary it cannot start, while env exits 127 for one, which classifies as
-// `todocli not found` without any shell (PLAN §6.4, §7.6).
+// `todocli not found` without any shell (PLAN §6.4, §7.6). The `--` keeps a
+// cliPath that starts with a dash a program name rather than an env option.
 function recordArgv(cliPath, action) {
-  var argv = ["/usr/bin/env", cliPath || DEFAULTS.cliPath, "--source", "omarchy", "--json", "pomodoro"]
+  var argv = ["/usr/bin/env", "--", cliPath || DEFAULTS.cliPath, "--source", "omarchy", "--json", "pomodoro"]
   if (action.verb === "start") {
     argv = argv.concat(["start"]).concat(taskArgs(action)).concat(["--planned", String(action.planned)])
     if (action.startedAt !== null && action.startedAt !== undefined) argv = argv.concat(["--started-at", String(Math.floor(action.startedAt / 1000))])
@@ -242,12 +274,12 @@ function parseSession(stdout) {
   return obj
 }
 
-// Queue a record action; `backend = none` records nothing (AC-6.14).
+// Queue a record action (copied, with its id); `backend = none` records
+// nothing (AC-6.14).
 function enqueue(state, effects, cfg, action) {
   if (cfg.backend !== "cli") return
-  action.id = state.nextRecordId
+  state.queue = state.queue.concat([Object.assign({ id: state.nextRecordId }, action)])
   state.nextRecordId += 1
-  state.queue = state.queue.concat([action])
   pump(state, effects)
 }
 
@@ -257,18 +289,18 @@ function dropClose(state, reason) {
 
 // One process at a time: the next action leaves the queue only after the
 // previous reply was applied, so a close created while its start was still
-// in flight takes the uid that start returned.
+// in flight takes the uid that start returned. The dequeued action is a copy:
+// the caller's previous state keeps its queue as it was.
 function pump(state, effects) {
   while (state.inflight === null && state.queue.length > 0) {
-    var action = state.queue[0]
+    var action = Object.assign({}, state.queue[0])
     state.queue = state.queue.slice(1)
     if (CLOSE_VERBS[action.verb] && action.sessionUid === null) {
       if (state.failedStart !== null) {
         var retry = state.failedStart
         state.failedStart = null
         state.queue = [action].concat(state.queue)
-        action = { id: action.id, verb: "start", taskId: retry.taskId, label: retry.label, planned: retry.planned, interrupt: true, startedAt: retry.startedAt, openedAt: retry.openedAt, retry: true }
-        action.id = state.nextRecordId
+        action = { id: state.nextRecordId, verb: "start", taskId: retry.taskId, label: retry.label, planned: retry.planned, interrupt: true, startedAt: retry.startedAt, openedAt: retry.openedAt, retry: true }
         state.nextRecordId += 1
       } else if (state.sessionUid !== null) {
         action.sessionUid = state.sessionUid
@@ -284,34 +316,24 @@ function pump(state, effects) {
   }
 }
 
-function recordResult(state, effects, event, now) {
+function recordResult(state, effects, cfg, now, event) {
   var action = state.inflight
   if (action === null || action.id !== event.id) return
   state.inflight = null
+  var opens = action.verb === "start" || action.verb === "retarget"
   var reason = classifyExit(event.exitCode, event.exitStatus)
-  var session = reason === null && (action.verb === "start" || action.verb === "retarget") ? parseSession(event.stdout) : null
-  if (reason === null && (action.verb === "start" || action.verb === "retarget") && session === null) reason = ERR_FAILED
-  if (action.verb === "start") {
-    if (reason === null) {
-      state.sessionUid = session.uid
-    } else {
-      state.lastRecordError = reason
-      if (!action.retry) state.failedStart = { taskId: action.taskId, label: action.label, planned: action.planned, startedAt: action.openedAt, openedAt: action.openedAt }
-    }
+  var session = reason === null && opens ? parseSession(event.stdout) : null
+  if (reason === null && opens && session === null) reason = ERR_FAILED
+  if (reason === null) {
+    if (opens) state.sessionUid = session.uid
+    if (CLEARS_RECORD_ERROR[action.verb]) state.lastRecordError = null
+  } else if (action.verb === "start") {
+    state.lastRecordError = reason
+    if (!action.retry) state.failedStart = { taskId: action.taskId, label: action.label, planned: action.planned, startedAt: action.openedAt, openedAt: action.openedAt }
   } else if (action.verb === "retarget") {
-    if (reason === null) {
-      state.sessionUid = session.uid
-      state.lastRecordError = null
-    } else {
-      state.sessionUid = action.sessionUid
-      state.lastRecordError = reason
-    }
-  } else if (action.verb === "interrupt") {
-    if (reason === null) state.lastRecordError = null
-    else state.lastRecordError = reason
-  } else if (reason === null) {
-    state.lastRecordError = null
-  } else if (action.resend) {
+    state.sessionUid = action.sessionUid
+    state.lastRecordError = reason
+  } else if (action.resend || action.verb === "interrupt") {
     dropClose(state, reason)
   } else {
     state.pendingClose = { verb: action.verb, sessionUid: action.sessionUid, focusSeconds: roundSeconds(action.focusSeconds) }
@@ -362,6 +384,14 @@ function attach(state, taskId, label) {
   state.taskLabel = label
 }
 
+// The one focus-time rule (A47): while running a work phase, the time since
+// the last tick counts, capped at 2 s per step; breaks and pauses never do.
+function accrueFocus(state, now) {
+  if (state.running && state.phase === "work" && state.lastTickAt !== null)
+    state.focusSeconds += Math.min(2, Math.max(0, (now - state.lastTickAt) / 1000))
+  state.lastTickAt = now
+}
+
 function resume(state, effects, cfg, now) {
   state.running = true
   state.endsAt = now + state.remaining * 1000
@@ -371,13 +401,10 @@ function resume(state, effects, cfg, now) {
 }
 
 function pause(state, now) {
-  if (state.running && state.phase === "work" && state.lastTickAt !== null) {
-    state.focusSeconds += Math.min(2, Math.max(0, (now - state.lastTickAt) / 1000))
-  }
+  accrueFocus(state, now)
   state.remaining = remainingAt(state, now)
   state.running = false
   state.endsAt = null
-  state.lastTickAt = now
 }
 
 function beginWork(state, effects, cfg, now) {
@@ -385,25 +412,31 @@ function beginWork(state, effects, cfg, now) {
   openSession(state, effects, cfg, now)
 }
 
-// The timer keeps its remaining time; the record splits (UX 6.2). A detach
-// (`x`) retargets to an unlinked `Pomodoro` session and clears the label.
-function retarget(state, effects, cfg, now, taskId, label, detach) {
+// The timer keeps its remaining time; the record splits (UX 6.2): `close`
+// names the new session's target, `taskId`/`label` the timer's.
+function switchTask(state, effects, cfg, now, taskId, label, close) {
   if (state.phase === "work" && state.recorded) {
-    var extra = detach
-      ? { taskId: "", label: UNLINKED_LABEL, planned: null }
-      : { taskId: taskId, label: label, planned: remainingAt(state, now) }
-    enqueueClose(state, effects, cfg, "retarget", extra)
+    accrueFocus(state, now)
+    enqueueClose(state, effects, cfg, "retarget", close)
     state.focusSeconds = 0
-    state.lastTickAt = now
   }
   attach(state, taskId, label)
+}
+
+function retarget(state, effects, cfg, now, taskId, label) {
+  switchTask(state, effects, cfg, now, taskId, label, { taskId: taskId, label: label, planned: remainingAt(state, now) })
+}
+
+// `x`: the session continues unlinked as `Pomodoro`; the label is cleared.
+function detach(state, effects, cfg, now) {
+  switchTask(state, effects, cfg, now, "", "", { taskId: "", label: UNLINKED_LABEL, planned: null })
 }
 
 function completePhase(state, effects, cfg, now) {
   state.running = false
   if (state.phase === "work") {
     state.completed += 1
-    var long = cfg.pomodorosPerCycle > 0 && state.completed % cfg.pomodorosPerCycle === 0
+    var long = state.completed % cfg.pomodorosPerCycle === 0
     enqueueClose(state, effects, cfg, "done")
     startPhase(state, cfg, now, long ? "longBreak" : "shortBreak", true)
     pushNotify(state, effects, cfg, long ? "longBreak" : "workEnd")
@@ -423,16 +456,14 @@ function tick(state, effects, cfg, now) {
   if (!state.running || state.phase === "idle") return
   var gap = now - (state.lastTickAt === null ? now : state.lastTickAt)
   if (gap > SUSPEND_GAP_MS) {
-    state.remaining = Math.max(0, Math.ceil((state.endsAt - state.lastTickAt) / 1000))
-    state.running = false
-    state.endsAt = null
+    // The machine slept: pause as of the last tick; the gap is not focus time.
+    pause(state, state.lastTickAt)
     state.lastTickAt = now
     writeState(state, effects, now)
     return
   }
-  if (state.phase === "work") state.focusSeconds += Math.min(2, Math.max(0, gap / 1000))
+  accrueFocus(state, now)
   state.remaining = remainingAt(state, now)
-  state.lastTickAt = now
   if (state.remaining <= 0) {
     completePhase(state, effects, cfg, now)
     writeState(state, effects, now)
@@ -475,18 +506,29 @@ function parseStateFile(text) {
   }
 }
 
-// Restore on service start (PLAN A22, UX 6.5): a recent phase comes back
-// paused; an old one with a session is closed as interrupted; else idle.
-function serviceStart(state, effects, cfg, now, saved) {
-  var s = saved && typeof saved === "object" && Number(saved.version) === STATE_VERSION ? parseStateFile(JSON.stringify(saved)) : null
+// Restore on service start (PLAN A22, UX 6.5) from the raw state file text:
+// a recent phase comes back paused; an old one with a session is closed as
+// interrupted; else idle. Two guards for the startup window: the IPC handler
+// enables at 100 ms, so an event may already have run — then the live timer
+// wins and only the count, a pending close and the owed interrupt are
+// adopted; and a session may be closed only once the settings are known
+// (`backend = none` would drop the interrupt), so with
+// `event.settingsKnown === false` the restore replies `deferred` and changes
+// nothing, and the service asks again when the shell arrives.
+function serviceStart(state, effects, cfg, now, event) {
+  var s = parseStateFile(event.text)
   if (s === null) {
     writeState(state, effects, now)
-    return
+    return ""
   }
-  state.completed = s.completed
-  state.pendingClose = s.pendingClose
   var age = s.updatedAt === null ? NaN : now - s.updatedAt
-  if (s.phase !== "idle" && age >= 0 && age <= s.remaining * 1000 + RESTORE_GRACE_MS) {
+  var recent = s.phase !== "idle" && age >= 0 && age <= s.remaining * 1000 + RESTORE_GRACE_MS
+  var restores = state.phase === "idle" && recent
+  var owesInterrupt = s.phase !== "idle" && s.sessionUid !== null && !restores
+  if (owesInterrupt && event.settingsKnown === false) return "deferred"
+  state.completed = s.completed
+  if (state.pendingClose === null) state.pendingClose = s.pendingClose
+  if (restores) {
     state.phase = s.phase
     state.running = false
     state.endsAt = null
@@ -498,85 +540,19 @@ function serviceStart(state, effects, cfg, now, saved) {
     state.recorded = s.phase === "work" && s.sessionUid !== null
     state.restored = true
     state.lastTickAt = now
-  } else if (s.phase !== "idle" && s.sessionUid !== null) {
+  } else if (owesInterrupt) {
     enqueue(state, effects, cfg, { verb: "interrupt", sessionUid: s.sessionUid, focusSeconds: s.focusSeconds })
   }
   writeState(state, effects, now)
+  return ""
 }
 
-// -------------------------------------------------------------- reduce
-
-function reduce(prev, event, now, cfg) {
-  var state = clone(prev)
-  var effects = []
-  var reply = ""
-  var type = event && event.type
-  if (type === "tick") {
-    tick(state, effects, cfg, now)
-  } else if (type === "startFor") {
-    reply = startFor(state, effects, cfg, now, event.taskId, event.label)
-  } else if (type === "toggle") {
-    if (state.phase === "idle") {
-      beginWork(state, effects, cfg, now)
-      reply = "started"
-    } else if (state.running) {
-      pause(state, now)
-      reply = "paused"
-    } else {
-      resume(state, effects, cfg, now)
-      reply = "resumed"
-    }
-    writeState(state, effects, now)
-  } else if (type === "pause" || type === "resume") {
-    if (state.phase === "idle") {
-      reply = "idle"
-    } else if (state.running) {
-      if (type === "pause") { pause(state, now); reply = "paused" } else reply = "resumed"
-      writeState(state, effects, now)
-    } else {
-      resume(state, effects, cfg, now)
-      reply = "resumed"
-      writeState(state, effects, now)
-    }
-  } else if (type === "skip") {
-    reply = "ok"
-    if (state.phase === "work") {
-      pause(state, now)
-      enqueueClose(state, effects, cfg, "cancel")
-      startPhase(state, cfg, now, "shortBreak", true)
-      writeState(state, effects, now)
-    } else if (isBreak(state.phase)) {
-      startPhase(state, cfg, now, "work", false)
-      writeState(state, effects, now)
-    }
-  } else if (type === "reset") {
-    reply = "ok"
-    if (state.phase !== "idle") {
-      pause(state, now)
-      state.remaining = phaseSeconds(state.phase, cfg)
-      writeState(state, effects, now)
-    }
-  } else if (type === "detach") {
-    if (state.phase === "idle") {
-      reply = "idle"
-    } else {
-      reply = "detached"
-      if (state.running) { state.focusSeconds += Math.min(2, Math.max(0, (now - state.lastTickAt) / 1000)); state.lastTickAt = now }
-      retarget(state, effects, cfg, now, "", "", true)
-      writeState(state, effects, now)
-    }
-  } else if (type === "serviceStart") {
-    serviceStart(state, effects, cfg, now, event.saved)
-  } else if (type === "recordResult") {
-    recordResult(state, effects, event, now)
-  }
-  return { state: state, effects: effects, reply: reply }
-}
+// -------------------------------------------------------------- events
 
 // UX 6.2: the result word per timer state.
-function startFor(state, effects, cfg, now, rawTaskId, rawLabel) {
-  var taskId = sanitizeTaskId(rawTaskId)
-  var label = sanitizeLabel(rawLabel)
+function startFor(state, effects, cfg, now, event) {
+  var taskId = sanitizeTaskId(event.taskId)
+  var label = sanitizeLabel(event.label)
   if (label === "") return "empty"
   var reply
   if (state.phase === "idle" || isBreak(state.phase)) {
@@ -585,7 +561,6 @@ function startFor(state, effects, cfg, now, rawTaskId, rawLabel) {
     reply = "started"
   } else if (state.running) {
     if (sameTask(state, taskId, label)) return "already running"
-    state.focusSeconds += Math.min(2, Math.max(0, (now - state.lastTickAt) / 1000))
     retarget(state, effects, cfg, now, taskId, label)
     reply = "retargeted"
   } else if (sameTask(state, taskId, label)) {
@@ -598,6 +573,91 @@ function startFor(state, effects, cfg, now, rawTaskId, rawLabel) {
   }
   writeState(state, effects, now)
   return reply
+}
+
+function onToggle(state, effects, cfg, now) {
+  var reply
+  if (state.phase === "idle") {
+    beginWork(state, effects, cfg, now)
+    reply = "started"
+  } else if (state.running) {
+    pause(state, now)
+    reply = "paused"
+  } else {
+    resume(state, effects, cfg, now)
+    reply = "resumed"
+  }
+  writeState(state, effects, now)
+  return reply
+}
+
+// `pause` toggles (the todo panel's `p` on the attached task); `resume` only resumes.
+function onPause(state, effects, cfg, now) {
+  if (state.phase === "idle") return "idle"
+  if (state.running) pause(state, now)
+  else resume(state, effects, cfg, now)
+  writeState(state, effects, now)
+  return state.running ? "resumed" : "paused"
+}
+
+function onResume(state, effects, cfg, now) {
+  if (state.phase === "idle") return "idle"
+  if (!state.running) resume(state, effects, cfg, now)
+  writeState(state, effects, now)
+  return "resumed"
+}
+
+function onSkip(state, effects, cfg, now) {
+  if (state.phase === "work") {
+    pause(state, now)
+    enqueueClose(state, effects, cfg, "cancel")
+    startPhase(state, cfg, now, "shortBreak", true)
+    writeState(state, effects, now)
+  } else if (isBreak(state.phase)) {
+    startPhase(state, cfg, now, "work", false)
+    writeState(state, effects, now)
+  }
+  return "ok"
+}
+
+function onReset(state, effects, cfg, now) {
+  if (state.phase !== "idle") {
+    pause(state, now)
+    state.remaining = phaseSeconds(state.phase, cfg)
+    writeState(state, effects, now)
+  }
+  return "ok"
+}
+
+function onDetach(state, effects, cfg, now) {
+  if (state.phase === "idle") return "idle"
+  detach(state, effects, cfg, now)
+  writeState(state, effects, now)
+  return "detached"
+}
+
+// Every handler is `(state, effects, cfg, now, event) -> reply | undefined`
+// and works on the copy `reduce` made.
+var HANDLERS = {
+  tick: tick,
+  startFor: startFor,
+  toggle: onToggle,
+  pause: onPause,
+  resume: onResume,
+  skip: onSkip,
+  reset: onReset,
+  detach: onDetach,
+  serviceStart: serviceStart,
+  recordResult: recordResult
+}
+
+function reduce(prev, event, now, cfg) {
+  var state = clone(prev)
+  var effects = []
+  var type = event && typeof event === "object" ? String(event.type) : ""
+  var handler = Object.prototype.hasOwnProperty.call(HANDLERS, type) ? HANDLERS[type] : null
+  var reply = handler ? (handler(state, effects, cfg, now, event) || "") : ""
+  return { state: state, effects: effects, reply: reply }
 }
 
 // ---------------------------------------------------------------- views
@@ -653,42 +713,40 @@ function restoredCaption(restored) {
   return restored ? "Restored after a reload · Space resumes" : ""
 }
 
-// Everything the pill and the popup bind to, derived once per state change.
+// Exactly what the pill and the popup bind to, derived once per state change.
 function view(state, cfg) {
   var hasSession = state.phase !== "idle"
   var secs = phaseSeconds(state.phase, cfg)
-  var progress = secs > 0 ? Math.max(0, Math.min(1, 1 - state.remaining / secs)) : 0
   return {
-    phase: state.phase,
-    running: state.running,
     isBreak: isBreak(state.phase),
     hasSession: hasSession,
     playing: state.running && hasSession,
     phaseGlyph: isBreak(state.phase) ? GLYPH_BREAK : GLYPH_WORK,
     phaseLabel: phaseLabel(state.phase),
-    phaseSeconds: secs,
-    progress: progress,
-    displaySeconds: hasSession ? state.remaining : secs,
+    progress: secs > 0 ? Math.max(0, Math.min(1, 1 - state.remaining / secs)) : 0,
     timeText: formatTime(hasSession ? state.remaining : secs),
     remainingText: formatTime(state.remaining),
     tooltip: tooltip(state),
     hint: hint(state),
     attached: state.taskLabel !== "",
-    taskId: state.taskId,
     taskLabel: state.taskLabel,
     completed: state.completed,
     perCycle: cfg.pomodorosPerCycle,
-    lastRecordError: state.lastRecordError,
     recordCaption: recordCaption(state.lastRecordError),
     restored: state.restored,
-    restoredCaption: restoredCaption(state.restored),
-    sessionUid: state.sessionUid
+    restoredCaption: restoredCaption(state.restored)
   }
 }
 
+// The widgets' fallback while the service is not bound yet.
+function idleView() {
+  return view(initialState(), settings({}))
+}
+
 // UX 5.1: horizontal = upstream's Style.space(56) × barSize with glyph and
-// time; vertical = barSize × iconSlot, glyph only, time in the tooltip.
-function pillLayout(vertical, m) {
-  if (vertical) return { width: m.barSize, height: m.iconSlot, showTime: false }
-  return { width: m.pillWidth, height: m.barSize, showTime: true }
+// time, dimmed to 0.7 while idle; vertical = barSize × iconSlot, glyph only,
+// time in the tooltip, dimmed unless playing.
+function pillLayout(vertical, m, v) {
+  if (vertical) return { width: m.barSize, height: m.iconSlot, showTime: false, opacity: v.playing ? 1.0 : 0.7 }
+  return { width: m.pillWidth, height: m.barSize, showTime: true, opacity: v.hasSession ? 1.0 : 0.7 }
 }

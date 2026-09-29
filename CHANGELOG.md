@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remaining time in the tooltip.
 - All logic moved to `Timer.js` (`.pragma library`), unit-tested under
   Node with line coverage enforced at 95 %.
+- `todocli` runs behind `/usr/bin/env -- <cliPath>`, so a `cliPath` that
+  starts with `-` is a program name, never an `env` option.
+- Settings are read from the widget's entry in the bar configuration the
+  shell injects into the service, so the restore after a reload never waits
+  for a pill to appear.
 
 ### Added
 
@@ -43,12 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings `backend`, `cliPath`, `todoTarget`; every setting is coerced so a
   string value set without `--json` still works.
 
+### Fixed
+
+- The state directory is made private (`0700`) before the first write, and a
+  failed `install -d` or a failed save is logged instead of ignored.
+- An IPC call that lands before the state file was read keeps the live
+  timer; the saved count, a pending close and the saved session's
+  `interrupt` are adopted instead of overwriting it.
+- Detaching a task during a running break no longer counts break time as
+  focus time.
+
 ## [0.1.0] - 2026-08-12
 
 Upstream release of markbus-ai/omarchy-pomodoro (`markbusking.pomodoro`):
 bar pill with phase tint, popup controller with count dots, progress bar
 and transport buttons, notifications and sounds at phase end, the six
-duration/sound/colour settings, IPC `open close toggle`.
+duration/sound/colour settings, IPC `open close show hide toggle`.
 
 [Unreleased]: https://github.com/abobreshov/omarchy-pomodoro/compare/54dec95...HEAD
 [0.1.0]: https://github.com/markbus-ai/omarchy-pomodoro/commit/54dec957244d7090bc1c46be7244f8a60a7f4866

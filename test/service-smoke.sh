@@ -5,10 +5,13 @@
 # the notification binary is a logging fake and todocli is test/fakebin.
 #
 # Drives the IPC target and checks: registration and typed functions, the
-# 0700 state directory and the state file, start/pause/skip/detach/reset
+# 0700 state directory (pre-created 0755, so the mode must be fixed before
+# the first write) and the state file, start/pause/skip/detach/reset
 # replies, the records the fake todocli received (uid round trip), a full
 # 1-minute work phase (done record + notification argv), restore of a fresh
-# state (paused, restored true) and the interrupt of a stale one.
+# state (paused, restored true) and the interrupt of a stale one. Settings
+# reach the service the way the shell delivers them: a `shell` object whose
+# `barConfig.layout` holds the widget's entry.
 set -euo pipefail
 
 dir=$(cd "$(dirname "$0")/.." && pwd)
@@ -35,7 +38,10 @@ ShellRoot {
     if (comp.status !== Component.Ready) { console.log("SMOKE LOAD FAILED " + comp.errorString()); Qt.quit(); return }
     root.svc = comp.createObject(null)
     root.svc.omarchyPath = "$scratch/omarchy"
-    root.svc.applySettings({ backend: "cli", cliPath: "$dir/test/fakebin/todocli", sound: "false", workMinutes: "1", shortBreakMinutes: 1, todoTarget: "abobreshov.todo" })
+    root.svc.shell = ({ barConfig: { layout: { left: [], center: [], right: [
+      { id: "agx.screen-time" },
+      { id: "abobreshov.pomodoro", backend: "cli", cliPath: "$dir/test/fakebin/todocli", sound: "false", workMinutes: "1", shortBreakMinutes: 1, todoTarget: "abobreshov.todo" }
+    ] } } })
     console.log("SMOKE SERVICE READY")
   }
 }
@@ -55,11 +61,12 @@ stop() { kill "$qs_pid" 2>/dev/null || true; wait "$qs_pid" 2>/dev/null || true;
 state() { python3 -c "import sys,json; d=json.load(open(sys.argv[1])); print(d[sys.argv[2]])" "$scratch/home/.local/state/abobreshov.pomodoro/state.json" "$1"; }
 records() { python3 -c "import sys,json; print(' | '.join(' '.join(json.loads(l)['argv'][4:]) for l in open(sys.argv[1]) if l.strip()))" "$log"; }
 
-echo "== fresh start"
+echo "== fresh start (state directory pre-created world-readable)"
+mkdir -p -m 0755 "$scratch/home/.local/state/abobreshov.pomodoro"
 launch
 check "service loaded without QML errors" "grep -q 'SMOKE SERVICE READY' '$scratch/qs.out' && ! grep -v 'portal' '$scratch/qs.out' | grep -qi 'error'"
 check "IPC target registered with typed functions" "qs ipc -p '$scratch/cfg' show | grep -q 'startFor(taskId: string, label: string): string'"
-check "state dir is 0700" "[[ \$(stat -c %a '$scratch/home/.local/state/abobreshov.pomodoro') == 700 ]]"
+check "pre-existing 0755 state dir is 0700 once the idle state was written" "[[ -f '$scratch/home/.local/state/abobreshov.pomodoro/state.json' && \$(stat -c %a '$scratch/home/.local/state/abobreshov.pomodoro') == 700 ]]"
 check "state file written idle" "[[ \$(state phase) == idle ]]"
 check "status idle" "[[ \$(status phase) == idle && \$(status backend) == cli ]]"
 check "startFor -> started" "[[ \$(ipc startFor 3 'Wire the payment-provider webhook') == started ]]"
