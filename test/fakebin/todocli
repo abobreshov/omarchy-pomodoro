@@ -1,0 +1,66 @@
+#!/usr/bin/env node
+// Fake todocli for the recording tests (PLAN §9.6, A5).
+//
+// Accepts the argv shape Timer.recordArgv builds:
+//   todocli --source omarchy --json pomodoro <verb> …
+// Appends one JSON line per call to $FAKE_LOG ({argv, env: {TODOCLI_*}}),
+// replies with a PLAN §3.12 session object on stdout and exits 0, unless
+// FAKE_EXIT is set (then exit with that code; FAKE_STDERR goes to stderr;
+// FAKE_STDOUT replaces the reply).
+"use strict"
+const fs = require("node:fs")
+
+const argv = process.argv.slice(2)
+if (process.env.FAKE_LOG) {
+  const env = {}
+  for (const k of Object.keys(process.env)) if (k.startsWith("TODOCLI_")) env[k] = process.env[k]
+  fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ argv, env }) + "\n")
+}
+
+const exit = Number(process.env.FAKE_EXIT || 0)
+if (process.env.FAKE_STDERR) process.stderr.write(process.env.FAKE_STDERR)
+if (exit !== 0) {
+  process.stdout.write(JSON.stringify({ ok: false, error: process.env.FAKE_STDERR || "fake failure", code: exit }) + "\n")
+  process.exit(exit)
+}
+if (process.env.FAKE_STDOUT !== undefined) {
+  process.stdout.write(process.env.FAKE_STDOUT)
+  process.exit(0)
+}
+
+const shape = ["--source", "omarchy", "--json", "pomodoro"]
+for (let i = 0; i < shape.length; i++) {
+  if (argv[i] !== shape[i]) {
+    process.stderr.write("fake todocli: unexpected argv " + JSON.stringify(argv) + "\n")
+    process.exit(1)
+  }
+}
+const verb = argv[4]
+const rest = argv.slice(5)
+const flag = (name) => { const i = rest.indexOf(name); return i === -1 ? null : rest[i + 1] }
+const attached = (prefix) => { const a = rest.find((x) => x.startsWith(prefix)); return a ? a.slice(prefix.length) : null }
+const uid = "01FAKE" + String(Date.now()).slice(-6) + Math.random().toString(36).slice(2, 6).toUpperCase()
+
+let session
+if (verb === "start" || verb === "retarget") {
+  const positional = verb === "start" ? rest[0] : rest[1]
+  const taskId = positional && /^[0-9]+$/.test(positional) ? Number(positional) : null
+  session = {
+    uid, task_id: taskId, label: attached("--label=") || "task " + taskId,
+    planned_seconds: Number(flag("--planned") || 1500), focus_seconds: 0,
+    started_at: new Date(Number(flag("--started-at") || Date.now() / 1000) * 1000).toISOString(),
+    ended_at: null, outcome: "running", next_uid: null, source: "omarchy"
+  }
+} else if (verb === "done" || verb === "cancel" || verb === "interrupt") {
+  const outcome = { done: "completed", cancel: "abandoned", interrupt: "interrupted" }[verb]
+  session = {
+    uid: rest[0], task_id: null, label: "x", planned_seconds: 1500,
+    focus_seconds: Number(flag("--focus-seconds") || 0),
+    started_at: new Date().toISOString(), ended_at: new Date().toISOString(),
+    outcome, next_uid: null, source: "omarchy"
+  }
+} else {
+  process.stderr.write("fake todocli: unknown verb " + verb + "\n")
+  process.exit(1)
+}
+process.stdout.write(JSON.stringify(session) + "\n")
