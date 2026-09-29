@@ -62,7 +62,8 @@ check() {
   fail=$((fail+1)); echo "FAIL $1 :: $2"
   echo "     status:  $(ipc status 2>&1 | head -c 600)"
   echo "     records: $(records 2>/dev/null || true)"
-  tail -n 3 "$scratch/qs.out" 2>/dev/null | sed 's/^/     qs: /'
+  # `|| true`: under `set -e` a failing diagnostic must not end the run.
+  tail -n 3 "$scratch/qs.out" 2>/dev/null | sed 's/^/     qs: /' || true
 }
 ipc() { qs ipc -p "$scratch/cfg" call -- abobreshov.pomodoro "$@"; }
 # One field of `status`. A `qs ipc` call can fail transiently (the socket is
