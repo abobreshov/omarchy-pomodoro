@@ -41,6 +41,13 @@ BarWidget {
   implicitHeight: root.layout.height
   opacity: root.layout.opacity
 
+  // The bar shows a tooltip only for a target that reports `tooltipHovered`
+  // (Bar.targetTooltipHovered, as the kit's Tray items and WidgetButton do);
+  // without it showTooltip returned before showing anything. The text is the
+  // one handed over on enter and stays put while hovered: showing it again
+  // on every tick would hide and reopen it each second.
+  readonly property bool tooltipHovered: visible && opacity > 0 && pillMouse.containsMouse
+
   // ---- Service binding: register for the open/close relays and hand the
   //      service to the popup. Settings reach the service through the
   //      shell's bar config, not through this widget.
@@ -133,6 +140,7 @@ BarWidget {
     }
 
     MouseArea {
+      id: pillMouse
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor

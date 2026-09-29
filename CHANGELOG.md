@@ -60,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `interrupt` are adopted instead of overwriting it.
 - Detaching a task during a running break no longer counts break time as
   focus time.
+- The bar pill's tooltip shows: the bar only shows a tooltip for a target
+  that reports `tooltipHovered`, which the pill now does. The text is the
+  one handed over on enter and stays put while hovered rather than being
+  re-shown on every tick.
 
 ## [0.1.0] - 2026-08-12
 
