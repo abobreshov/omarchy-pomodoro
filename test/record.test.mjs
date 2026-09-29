@@ -1,8 +1,8 @@
-// The recording path end to end under Node: Timer.recordArgv builds the argv,
-// a real process runs it against the fake todocli (test/fakebin/todocli),
-// and its exit code and stdout go back through Timer.reduce as the service
-// does in Service.qml. Covers PLAN §7.6 (argv order, env prefix, exit
-// mapping) with the fake logging what it was asked.
+// The recording path (PLAN §7.6): the argv Record.js builds per verb and its
+// exit-code classification as units, then end to end under Node — a real
+// process runs the argv against the fake todocli (test/fakebin/todocli) and
+// its exit code and stdout go back through Timer.reduce as the service does
+// in Service.qml, the fake logging what it was asked.
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
@@ -10,7 +10,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { loadQmlJs } from "./qml-js-loader.mjs"
-import { Sim } from "./harness.mjs"
+import { Sim, SESSION } from "./harness.mjs"
 
 const T = loadQmlJs(new URL("../Timer.js", import.meta.url).pathname)
 const FAKE = new URL("./fakebin/todocli", import.meta.url).pathname
@@ -128,4 +128,35 @@ test("the fake refuses an argv outside the contract", () => {
   assert.match(r.stderr, /unexpected argv/)
   const u = spawnSync(FAKE, ["--source", "omarchy", "--json", "pomodoro", "bogus"], { encoding: "utf8" })
   assert.equal(u.status, 1)
+})
+
+// --------------------------------------------------------- argv units (7.6)
+
+test("recordArgv: every verb, env prefix, attached --label, one element per value", () => {
+  const p = ["/usr/bin/env", "--", "/opt/todocli", "--source", "omarchy", "--json", "pomodoro"]
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "start", taskId: "3", label: "L", planned: 1500, interrupt: true, startedAt: null }), p.concat(["start", "3", "--planned", "1500", "--interrupt"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "start", taskId: "", label: "--json x", planned: 60, interrupt: true, startedAt: 1700000000999 }), p.concat(["start", "--label=--json x", "--planned", "60", "--started-at", "1700000000", "--interrupt"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "done", sessionUid: "S", focusSeconds: 12.6 }), p.concat(["done", "S", "--focus-seconds", "13"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "cancel", sessionUid: "S", focusSeconds: -1 }), p.concat(["cancel", "S", "--focus-seconds", "0"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "retarget", sessionUid: "S", taskId: "8", label: "x", focusSeconds: 300, planned: 1200 }), p.concat(["retarget", "S", "8", "--focus-seconds", "300", "--planned", "1200"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "retarget", sessionUid: "S", taskId: "", label: "Pomodoro", focusSeconds: 600, planned: null }), p.concat(["retarget", "S", "--label=Pomodoro", "--focus-seconds", "600"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "interrupt", sessionUid: "S", focusSeconds: 378 }), p.concat(["interrupt", "S", "--focus-seconds", "378"]))
+  assert.deepEqual(T.recordArgv("", { verb: "interrupt", sessionUid: "S", focusSeconds: 1 })[2], "todocli")
+  assert.deepEqual(T.recordArgv("-S sh", { verb: "interrupt", sessionUid: "S", focusSeconds: 1 }).slice(0, 3), ["/usr/bin/env", "--", "-S sh"])
+})
+
+test("classifyExit and parseSession", () => {
+  assert.equal(T.classifyExit(0, 0), null)
+  assert.equal(T.classifyExit(127, 0), "todocli not found")
+  assert.equal(T.classifyExit(75, 0), "database busy")
+  assert.equal(T.classifyExit(1, 0), "todocli error")
+  assert.equal(T.classifyExit(0, 1), "todocli error")
+  assert.equal(T.classifyExit(11, 1), "todocli error")
+  assert.deepEqual(T.parseSession(SESSION("U1")).uid, "U1")
+  assert.equal(T.parseSession(""), null)
+  assert.equal(T.parseSession("{"), null)
+  assert.equal(T.parseSession("[1]"), null)
+  assert.equal(T.parseSession('{"uid": ""}'), null)
+  assert.equal(T.parseSession('{"uid": 5}'), null)
+  assert.equal(T.parseSession('{"ok":false,"error":"x","code":1}'), null)
 })

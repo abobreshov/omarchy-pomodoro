@@ -208,7 +208,9 @@ engine does and hides Node's own globals (`process`, `Buffer`, timers,
 `fetch`, `require`) so a call that would not exist in QML fails the tests;
 `test/harness.mjs` drives the reducer and checks after every event that it
 left its input state untouched; `test/fakebin/todocli` stands in for the
-real CLI in the recording tests.
+real CLI in the recording tests. The test files mirror the modules:
+`phase`, `notify`, `machine`, `queue`, `restore`, `view`, `record` (the fake
+todocli end to end), `timer` (the facade) and `loader`.
 
 ## License
 

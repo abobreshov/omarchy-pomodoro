@@ -1,5 +1,5 @@
-// Test harness for Timer.js: drives the reducer at a simulated clock,
-// collects the effects and answers every `record` effect through
+// Test harness for the pomodoro machine: drives the reducer at a simulated
+// clock, collects the effects and answers every `record` effect through
 // `answer(effect)`, feeding the reply back as Service.qml does.
 //
 //   answer(effect) -> { exitCode, exitStatus?, stdout?, stderr? } | null
@@ -58,3 +58,22 @@ export class Sim {
   sounds() { return this.effects.filter((e) => e.type === "sound") }
   clear() { this.effects = [] }
 }
+
+// The PLAN §3.12 session object todocli prints for a start or retarget.
+export const SESSION = (uid) => JSON.stringify({ uid, task_id: 3, label: "x", planned_seconds: 1500, focus_seconds: 0, started_at: "2026-09-29T09:00:00.000Z", ended_at: null, outcome: "running", next_uid: null, source: "omarchy" }) + "\n"
+
+// A fresh fake session per answered record (`ok`, usable as a Sim `answer`);
+// `last` is the uid the latest one returned. One counter per test file.
+export function fakeSessions() {
+  let n = 0
+  return {
+    ok() { n += 1; return { exitCode: 0, stdout: SESSION("S" + n) } },
+    get last() { return "S" + n }
+  }
+}
+
+export function startFor(sim, id, label) { return sim.apply({ type: "startFor", taskId: id, label }) }
+
+// A checkpoint written mid-work at t = 1 000 000 with 1122 s left and an open
+// session: recent 40 s later (AC-6.19), stale 61 s past its deadline (AC-6.20).
+export const SAVED = { version: 1, phase: "work", running: true, endsAt: 1000000 + 1122000, remaining: 1122, completed: 2, taskId: "12", taskLabel: "Write UX spec for the panels", sessionUid: "S", focusSeconds: 378, pendingClose: null, updatedAt: 1000000 }
