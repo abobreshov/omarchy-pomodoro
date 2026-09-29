@@ -9,8 +9,9 @@ import "Timer.js" as TimerLib
 // created once per monitor), so the timer, the IPC target, notifications,
 // sounds, todocli recording and the state file all live here; every
 // BarWidget/Panel binds to this object through bar.shell.serviceFor() and
-// only renders and forwards key presses. All logic is in Timer.js: this file
-// runs its effects and feeds it events.
+// only renders and forwards key presses. All logic is in Timer.js and the
+// modules behind it (Machine.js holds `reduce`): this file runs its effects
+// and feeds it events.
 //
 // Forked from markbus-ai/omarchy-pomodoro (MIT). The phases, durations,
 // settings keys, notification copy and sounds are upstream's.

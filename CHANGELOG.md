@@ -20,8 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completing the phase.
 - Vertical bars show the phase glyph alone, one icon slot high, with the
   remaining time in the tooltip.
-- All logic moved to `Timer.js` (`.pragma library`), unit-tested under
-  Node with line coverage enforced at 95 %.
+- All logic moved out of QML into `.pragma library` modules, one per
+  concern — `Phase.js`, `StateFile.js`, `Notify.js`, `Record.js`,
+  `Machine.js`, `View.js` — behind the `Timer.js` facade the QML files
+  import; unit-tested under Node with line coverage enforced at 95 %, the
+  test files mirroring the modules. No code file exceeds 500 lines.
 - `todocli` runs behind `/usr/bin/env -- <cliPath>`, so a `cliPath` that
   starts with `-` is a program name, never an `env` option.
 - Settings are read from the widget's entry in the bar configuration the

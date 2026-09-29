@@ -185,11 +185,27 @@ scratch directory, a logging fake `omarchy-notification-send` and the fake
 todocli, then drives the IPC target through a whole one-minute phase and the
 restore paths. It never touches the running shell or your state.
 
-`Timer.js` is a `.pragma library` file holding all of the logic (phases,
-deadline, suspend, recording queue, restore, notification argv, view
-strings); `test/qml-js-loader.mjs` runs it under Node with a small `vm`
-loader that hides Node's own globals (`process`, `Buffer`, timers, `fetch`,
-`require`) so a call that would not exist in QML fails the tests;
+All of the logic is in `.pragma library` JavaScript, one module per concern,
+behind the `Timer.js` facade that the three QML files import:
+
+| Module | Owns |
+|---|---|
+| `Phase.js` | phases and their lengths, the deadline arithmetic, settings coercion, the label and task-id sanitisers |
+| `StateFile.js` | the state-file document and its tolerant parser |
+| `Notify.js` | notification copy and argv, the phase-end sounds |
+| `Record.js` | the `todocli` argv per verb, exit classification, the one-at-a-time record queue and its recovery rules (retry a failed start, re-send a failed close once) |
+| `Machine.js` | the state, the transitions, the restore on service start, the event handlers and the pure `reduce(state, event, now, cfg) → { state, effects, reply }` |
+| `View.js` | the `status` JSON, the pill and popup view, tooltip, hint, captions and pill geometry |
+| `Timer.js` | one-line pass-throughs to the above; the only file QML imports |
+
+Every code file, tests included, stays under 500 lines; one that grows past
+the limit is split by responsibility, never waived (the productivity repo's
+`tools/check-file-length.sh` gate).
+
+`test/qml-js-loader.mjs` runs a library under Node with a small `vm` loader
+that resolves `.import "Other.js" as Name` between modules the way the QML
+engine does and hides Node's own globals (`process`, `Buffer`, timers,
+`fetch`, `require`) so a call that would not exist in QML fails the tests;
 `test/harness.mjs` drives the reducer and checks after every event that it
 left its input state untouched; `test/fakebin/todocli` stands in for the
 real CLI in the recording tests.
