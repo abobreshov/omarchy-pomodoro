@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   idle and the pill shows the idle glyph. The reply is `reset`, or `idle`
   when the timer was idle already. The pomodoro count and a pending close
   are kept. `skip` is unchanged.
+- The service smoke test polls for the phase end instead of sleeping 62 s
+  against a 60 s phase, retries a transient read-only IPC failure, checks
+  `loadedAt` across a restart and prints the status, the records and the
+  `qs` log tail when a check fails.
 
 ### Added
 
@@ -58,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Last session not recorded: <reason>.`
 - Settings `backend`, `cliPath`, `todoTarget`; every setting is coerced so a
   string value set without `--json` still works.
+- `status.loadedAt`: the millisecond the running service instance was
+  created. `keepLoaded: true` keeps the service, and its old code, alive
+  across `omarchy plugin update`, so a rollout checks that `omarchy restart
+  shell` replaced it: a `loadedAt` older than the update is the previous
+  code. The README's Install section carries the three-command rollout.
 
 ### Fixed
 

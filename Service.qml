@@ -44,7 +44,8 @@ Item {
   }
 
   // The machine state, replaced wholesale on every event so bindings refresh.
-  property var timerState: TimerLib.initialState()
+  // The clock stamps this instance's creation (`status.loadedAt`).
+  property var timerState: TimerLib.initialState(Date.now())
   readonly property var view: TimerLib.view(root.timerState, root.cfg)
 
   property bool ipcReady: false

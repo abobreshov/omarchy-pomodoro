@@ -67,6 +67,7 @@ test("each facade function answers exactly as its module for the same arguments"
     ["isNumericId", ["12"]],
     ["formatTime", [3661]],
     ["initialState", []],
+    ["initialState", [4000]],
     ["reduce", [state, { type: "tick" }, 10000, cfg]],
     ["recordArgv", ["/opt/todocli", start]],
     ["classifyExit", [75, 0]],

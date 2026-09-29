@@ -6,13 +6,19 @@
 #
 # Drives the IPC target and checks: registration and typed functions, the
 # 0700 state directory (pre-created 0755, so the mode must be fixed before
-# the first write) and the state file, start/pause/skip/detach replies,
-# reset back to idle from work (the cancel record) and from a break (no
-# record), the records the fake todocli received (uid round trip), a full
-# 1-minute work phase (done record + notification argv), restore of a fresh
-# state (paused, restored true) and the interrupt of a stale one. Settings
-# reach the service the way the shell delivers them: a `shell` object whose
-# `barConfig.layout` holds the widget's entry.
+# the first write) and the state file, `status.loadedAt` (this instance's
+# start; a restarted instance reports a newer one — the rollout check),
+# start/pause/skip/detach replies, reset back to idle from work (the cancel
+# record) and from a break (no record), the records the fake todocli
+# received (uid round trip), a full 1-minute work phase (done record +
+# notification argv), restore of a fresh state (paused, restored true) and
+# the interrupt of a stale one. Settings reach the service the way the shell
+# delivers them: a `shell` object whose `barConfig.layout` holds the widget's
+# entry.
+#
+# The phase end is polled, not slept for (a fixed 62 s against a 60 s phase
+# left ~3 s of margin), a read-only `status` call is retried when `qs ipc`
+# fails transiently, and a failing check prints what the service answered.
 set -euo pipefail
 
 dir=$(cd "$(dirname "$0")/.." && pwd)
@@ -49,10 +55,38 @@ ShellRoot {
 EOF
 
 pass=0; fail=0
-check() { if eval "$2"; then pass=$((pass+1)); echo "ok   $1"; else fail=$((fail+1)); echo "FAIL $1 :: $2"; fi }
+# A failing check prints the status line, the records so far and the tail of
+# the qs log, so a flaky run leaves the values behind instead of a bare FAIL.
+check() {
+  if eval "$2"; then pass=$((pass+1)); echo "ok   $1"; return; fi
+  fail=$((fail+1)); echo "FAIL $1 :: $2"
+  echo "     status:  $(ipc status 2>&1 | head -c 600)"
+  echo "     records: $(records 2>/dev/null || true)"
+  tail -n 3 "$scratch/qs.out" 2>/dev/null | sed 's/^/     qs: /'
+}
 ipc() { qs ipc -p "$scratch/cfg" call -- abobreshov.pomodoro "$@"; }
-status() { ipc status | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[sys.argv[1]])" "$1"; }
+# One field of `status`. A `qs ipc` call can fail transiently (the socket is
+# busy while the instance starts or under load): a read-only call is retried
+# up to three times; a mutator never is, so `ipc` stays a single call.
+status() {
+  local out="" n
+  for n in 1 2 3; do
+    out=$(ipc status 2>/dev/null) && [[ $out == \{* ]] && break
+    sleep 0.3
+  done
+  printf '%s' "$out" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[sys.argv[1]])" "$1"
+}
+# Polls a status field until it reads `value`, for at most `timeout` seconds.
+wait_for() { # field value timeout
+  local end=$((SECONDS + $3))
+  while (( SECONDS < end )); do
+    [[ $(status "$1") == "$2" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
 launch() {
+  launched_at=$(date +%s%3N)
   ( cd "$scratch" && HOME="$scratch/home" FAKE_LOG="$log" exec qs -p "$scratch/cfg" ) > "$scratch/qs.out" 2>&1 &
   qs_pid=$!
   for _ in $(seq 1 50); do grep -q "SMOKE SERVICE READY" "$scratch/qs.out" 2>/dev/null && break; sleep 0.1; done
@@ -70,6 +104,9 @@ check "IPC target registered with typed functions" "qs ipc -p '$scratch/cfg' sho
 check "pre-existing 0755 state dir is 0700 once the idle state was written" "[[ -f '$scratch/home/.local/state/abobreshov.pomodoro/state.json' && \$(stat -c %a '$scratch/home/.local/state/abobreshov.pomodoro') == 700 ]]"
 check "state file written idle" "[[ \$(state phase) == idle ]]"
 check "status idle" "[[ \$(status phase) == idle && \$(status backend) == cli ]]"
+first_loaded=$(status loadedAt)
+check "status.loadedAt is the ms this instance started (not before launch, not in the future)" "[[ '$first_loaded' =~ ^[0-9]+$ && $first_loaded -ge $launched_at && $first_loaded -le \$(date +%s%3N) ]]"
+check "the state file does not carry loadedAt" "! grep -q loadedAt '$scratch/home/.local/state/abobreshov.pomodoro/state.json'"
 check "startFor -> started" "[[ \$(ipc startFor 3 'Wire the payment-provider webhook') == started ]]"
 sleep 1.5
 check "status work running with task" "[[ \$(status phase) == work && \$(status running) == True && \$(status taskId) == 3 ]]"
@@ -97,6 +134,7 @@ sleep 1
 check "reset cancel record with the session's uid" "[[ \"\$(records)\" == *'cancel $uidd --focus-seconds '* ]]"
 check "state file idle after reset, no session" "[[ \$(state phase) == idle && \$(state sessionUid) == None && \$(state taskId) == '' ]]"
 check "reset while idle -> idle" "[[ \$(ipc reset) == idle ]]"
+check "loadedAt unchanged by the events so far" "[[ \$(status loadedAt) == '$first_loaded' ]]"
 check "start -> started" "[[ \$(ipc start) == started ]]"
 sleep 1
 uid3=$(status sessionUid)
@@ -108,9 +146,11 @@ check "skip break -> work paused" "[[ \$(ipc skip) == ok && \$(status phase) == 
 check "startFor in paused work -> retargeted (no session yet: start)" "[[ \$(ipc startFor 5 'Phase two') == retargeted ]]"
 sleep 1
 check "start record for the new phase" "[[ \"\$(records)\" == *'| start 5 --planned 60 --interrupt' ]]"
-echo "-- waiting 62 s for the phase to complete"
-sleep 62
-check "phase completed into a break" "[[ \$(status phase) == shortBreak && \$(status completed) == 1 ]]"
+echo "-- waiting for the 60 s phase to complete (polled, up to 75 s)"
+t0=$SECONDS
+check "phase completed into a break" "wait_for phase shortBreak 75 && [[ \$(status completed) == 1 ]]"
+echo "   phase end seen after $((SECONDS - t0)) s"
+sleep 1
 check "done record with ~60 s" "[[ \"\$(records)\" =~ done\ 01FAKE[A-Z0-9]+\ --focus-seconds\ (59|60|61)$ ]]"
 check "notification argv: -g glyph -u normal, constant headline" "grep -qF -- \$'-u\x1fnormal\x1fPomodoro complete\x1fWork session done. Take a short break.' '$nlog' && grep -qF -- \$'-g\x1f' '$nlog'"
 # The body's embedded newline lands as a line break in the log: the label
@@ -134,6 +174,7 @@ EOF
 launch
 sleep 3.5
 check "restored paused with task and uid" "[[ \$(status phase) == work && \$(status running) == False && \$(status remaining) == 40 && \$(status taskId) == 12 && \$(status sessionUid) == 01FAKERESTORED && \$(status restored) == True ]]"
+check "a restarted service reports a newer loadedAt (the rollout check), not before its launch" "[[ \$(status loadedAt) -gt $first_loaded && \$(status loadedAt) -ge $launched_at ]]"
 check "no record on a fresh restore" "[[ ! -s '$log' ]]"
 check "resume clears restored" "[[ \$(ipc start) == resumed && \$(status restored) == False ]]"
 stop

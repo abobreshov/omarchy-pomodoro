@@ -46,8 +46,22 @@ service (`Service.qml`, the one timer) once per session and a pill
 `keepLoaded: true`, so a hot reload of any plugin under
 `~/.config/omarchy/plugins` leaves a running phase untouched. The cost: a
 code change to *this* plugin only applies after `omarchy restart shell`.
-While developing, remove `keepLoaded` from the manifest to get hot reload
-back and add it again before releasing.
+`omarchy plugin update` fast-forwards the checkout, but the shell keeps the
+running service — and its old code — across the reload that follows, so a
+rollout is three commands:
+
+```bash
+omarchy plugin update abobreshov.pomodoro --yes   # the checkout; the running service keeps the old code
+omarchy restart shell                             # replaces the service (refused while the session is locked)
+omarchy-shell abobreshov.pomodoro status          # loadedAt later than the update: the new code is live
+```
+
+`status.loadedAt` is the millisecond the running service instance was
+created: while it is older than the update, the shell is still running the
+previous code. The restart brings a recent phase back paused from the state
+file and closes an older one as interrupted (see Timer mechanics), so
+nothing is lost but the pause. While developing, remove `keepLoaded` from
+the manifest to get hot reload back and add it again before releasing.
 
 ## Settings
 
@@ -99,7 +113,7 @@ omarchy bar set abobreshov.pomodoro backend cli
 | `detach` | `detached` / `idle` |
 | `skip` | `ok`. Work: the session is cancelled and a short break starts running; break: a work phase, paused. |
 | `reset` | `reset` / `idle`. The popup's `R`. Back to idle with no task from any phase: a recorded work session is cancelled first (`todocli pomodoro cancel <uid> --focus-seconds <n>`, the same path as `skip`, so todocli sees it); a break or a work phase that opened no session records nothing. The state file is written idle (no task, no session), the pill shows the idle glyph; the pomodoro count and a pending close are kept. |
-| `status` | one JSON line: `{version, backend, cliPath, phase, running, remaining, endsAt, completed, taskId, label, sessionUid, lastRecordError, restored}` |
+| `status` | one JSON line: `{version, backend, cliPath, phase, running, remaining, endsAt, completed, taskId, label, sessionUid, lastRecordError, restored, loadedAt}`. `loadedAt` is the millisecond the running service instance was created (see Install: the rollout check); it survives every event and restore and is not in the state file. |
 
 The todo plugin (`abobreshov.todo`) calls `startFor` when you press `p` on a
 task; with the timer already on that task it calls `pause` instead, which
@@ -188,7 +202,10 @@ test/service-smoke.sh                          # opt-in: Service.qml in a scratc
 The smoke test starts its own `qs` instance with `HOME` redirected to a
 scratch directory, a logging fake `omarchy-notification-send` and the fake
 todocli, then drives the IPC target through a whole one-minute phase and the
-restore paths. It never touches the running shell or your state.
+restore paths (polling for the phase end, retrying a transient read-only IPC
+failure, and printing the status, the records and the `qs` log tail when a
+check fails). It never touches the running shell or your state; a change
+reaches the running shell only through the rollout under Install.
 
 All of the logic is in `.pragma library` JavaScript, one module per concern,
 behind the `Timer.js` facade that the three QML files import:

@@ -41,7 +41,7 @@ function isNumericId(s) { return Phase.isNumericId(s) }
 function formatTime(secs) { return Phase.formatTime(secs) }
 
 // Machine
-function initialState() { return Machine.initialState() }
+function initialState(now) { return Machine.initialState(now) }
 function reduce(prev, event, now, cfg) { return Machine.reduce(prev, event, now, cfg) }
 
 // Record

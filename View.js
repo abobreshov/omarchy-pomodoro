@@ -22,7 +22,8 @@ function statusJson(state, cfg, now) {
     label: state.taskLabel,
     sessionUid: state.sessionUid,
     lastRecordError: state.lastRecordError,
-    restored: state.restored
+    restored: state.restored,
+    loadedAt: state.loadedAt
   })
 }
 

@@ -5,7 +5,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { loadQmlJs } from "./qml-js-loader.mjs"
-import { Sim, fakeSessions, startFor } from "./harness.mjs"
+import { Sim, SAVED, fakeSessions, startFor } from "./harness.mjs"
 
 const T = loadQmlJs(new URL("../Timer.js", import.meta.url).pathname)
 const CLI = T.settings({ backend: "cli" })
@@ -18,7 +18,7 @@ test("statusJson has the §7.4 shape; remaining is live while running", () => {
   startFor(sim, "3", "Wire it")
   sim.tick(10)
   const s = JSON.parse(T.statusJson(sim.state, CLI, sim.now + 2500))
-  assert.deepEqual(Object.keys(s), ["version", "backend", "cliPath", "phase", "running", "remaining", "endsAt", "completed", "taskId", "label", "sessionUid", "lastRecordError", "restored"])
+  assert.deepEqual(Object.keys(s), ["version", "backend", "cliPath", "phase", "running", "remaining", "endsAt", "completed", "taskId", "label", "sessionUid", "lastRecordError", "restored", "loadedAt"])
   assert.equal(s.version, 1)
   assert.equal(s.backend, "cli")
   assert.equal(s.cliPath, "todocli")
@@ -134,6 +134,33 @@ test("view exposes exactly what the pill and the popup bind; idleView is the wid
   assert.deepEqual(Object.keys(T.view(T.initialState(), NONE)).sort(), keys.slice().sort())
   assert.deepEqual(T.idleView(), T.view(T.initialState(), T.settings({})))
   assert.equal(T.idleView().tooltip, "Pomodoro — click to start")
+})
+
+// The rollout check (README "Install"): `keepLoaded: true` keeps the service
+// alive across a plugin update, so the ms the instance was created tells
+// whether `omarchy restart shell` replaced it. It belongs to the instance,
+// not the phase: no event and no restore changes it, the state file never
+// carries it.
+test("loadedAt: the ms the service instance was created, in every status, untouched by events and restores", () => {
+  assert.equal(T.initialState().loadedAt, null)
+  assert.equal(T.initialState(1790719927174).loadedAt, 1790719927174)
+  for (const bad of [undefined, null, "1790719927174", NaN, Infinity, {}]) assert.equal(T.initialState(bad).loadedAt, null, String(bad))
+  assert.equal(JSON.parse(T.statusJson(T.initialState(), NONE)).loadedAt, null)
+  const sim = new Sim(T, CLI, { now: 5000, answer: fake.ok })
+  sim.state = T.initialState(4000)
+  const at = () => JSON.parse(T.statusJson(sim.state, CLI, sim.now)).loadedAt
+  assert.equal(at(), 4000)
+  startFor(sim, "3", "Wire it")
+  sim.tick(1500)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(at(), 4000)
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.equal(at(), 4000)
+  sim.restore(SAVED)
+  assert.equal(sim.state.restored, true)
+  assert.equal(at(), 4000)
+  for (const w of sim.writes()) assert.equal("loadedAt" in w.doc, false)
+  assert.equal("loadedAt" in T.stateFileDoc(sim.state, sim.now), false)
 })
 
 test("captions: record error and restored copy (UX 5.2)", () => {

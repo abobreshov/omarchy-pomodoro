@@ -30,8 +30,15 @@ var RESTORE_GRACE_MS = 60000
 
 // ---------------------------------------------------------------- state
 
-function initialState() {
+// `now` is the ms the service instance was created (`Date.now()` in
+// Service.qml; the tests pass nothing). `loadedAt` names the instance, not
+// the phase: no event and no restore changes it and the state file never
+// carries it, so `status` can tell whether `omarchy restart shell` replaced
+// the service that `keepLoaded: true` keeps alive across a plugin update
+// (README "Install": a `loadedAt` older than the update is the old code).
+function initialState(now) {
   return {
+    loadedAt: typeof now === "number" && isFinite(now) ? now : null,
     phase: "idle",           // idle | work | shortBreak | longBreak
     running: false,
     endsAt: null,            // ms wall clock while running
