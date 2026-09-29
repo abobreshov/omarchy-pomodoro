@@ -1,0 +1,14 @@
+# OS / editor cruft
+.DS_Store
+*~
+*.swp
+
+# Editors
+.idea/
+.vscode/
+
+# Node (the tests have no dependencies; keep any local install out)
+node_modules/
+
+# Local scratch
+*.log

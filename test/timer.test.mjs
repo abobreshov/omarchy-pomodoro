@@ -1,0 +1,921 @@
+// Unit tests for Timer.js: the pure pomodoro state machine (PLAN §7.3, A47,
+// UX §5–§6, PRODUCT AC-6.11–6.22, UI-13). Time is injected; record effects are
+// answered by the harness with fake todocli replies.
+import { test } from "node:test"
+import assert from "node:assert/strict"
+import { loadQmlJs } from "./qml-js-loader.mjs"
+
+const T = loadQmlJs(new URL("../Timer.js", import.meta.url).pathname)
+
+const CLI = T.settings({ backend: "cli" })
+const NONE = T.settings({})
+const SESSION = (uid) => JSON.stringify({ uid, task_id: 3, label: "x", planned_seconds: 1500, focus_seconds: 0, started_at: "2026-09-29T09:00:00.000Z", ended_at: null, outcome: "running", next_uid: null, source: "omarchy" }) + "\n"
+
+let uidCounter = 0
+function okReply() {
+  uidCounter += 1
+  return { exitCode: 0, stdout: SESSION("S" + uidCounter) }
+}
+
+// Drives the reducer: applies events at the simulated clock, collects the
+// effects and answers every record effect through `answer(action)`.
+class Sim {
+  constructor(cfg, now) {
+    this.cfg = cfg
+    this.now = now || 0
+    this.state = T.initialState()
+    this.effects = []
+    this.answer = okReply
+  }
+  apply(event) {
+    const out = T.reduce(this.state, event, this.now, this.cfg)
+    this.state = out.state
+    for (const e of out.effects) this.handle(e)
+    return out.reply
+  }
+  handle(e) {
+    this.effects.push(e)
+    if (e.type !== "record") return
+    const r = this.answer(e)
+    if (r) this.reply(e, r)
+  }
+  reply(e, r) {
+    this.apply({ type: "recordResult", id: e.id, exitCode: r.exitCode, exitStatus: r.exitStatus || 0, stdout: r.stdout || "", stderr: r.stderr || "" })
+  }
+  tick(seconds) {
+    for (let i = 0; i < seconds; i++) {
+      this.now += 1000
+      this.apply({ type: "tick" })
+    }
+  }
+  records() { return this.effects.filter((e) => e.type === "record") }
+  verbs() { return this.records().map((e) => e.verb) }
+  writes() { return this.effects.filter((e) => e.type === "writeState") }
+  notifies() { return this.effects.filter((e) => e.type === "notify") }
+  sounds() { return this.effects.filter((e) => e.type === "sound") }
+  clear() { this.effects = [] }
+}
+
+function startFor(sim, id, label) { return sim.apply({ type: "startFor", taskId: id, label }) }
+
+// ---------------------------------------------------------------- settings
+
+test("settings: A21 coercion of every key", () => {
+  const d = T.settings({})
+  assert.deepEqual(d, { workMinutes: 25, shortBreakMinutes: 5, longBreakMinutes: 15, pomodorosPerCycle: 4, sound: true, breakColor: "#a6e3a1", backend: "none", cliPath: "todocli", todoTarget: "abobreshov.todo" })
+  const s = T.settings({ workMinutes: "50", shortBreakMinutes: "abc", longBreakMinutes: -3, pomodorosPerCycle: "0", sound: "false", breakColor: "", backend: "cli", cliPath: "", todoTarget: "x.todo" })
+  assert.equal(s.workMinutes, 50)
+  assert.equal(s.shortBreakMinutes, 5)
+  assert.equal(s.longBreakMinutes, 1)
+  assert.equal(s.pomodorosPerCycle, 4)
+  assert.equal(s.sound, false)
+  assert.equal(s.breakColor, "#a6e3a1")
+  assert.equal(s.backend, "cli")
+  assert.equal(s.cliPath, "todocli")
+  assert.equal(s.todoTarget, "x.todo")
+  assert.equal(T.settings({ sound: false }).sound, false)
+  assert.equal(T.settings({ sound: "true" }).sound, true)
+  assert.equal(T.settings({ backend: "standalone" }).backend, "none")
+  assert.equal(T.settings({ cliPath: "/opt/todocli", breakColor: "#fff" }).cliPath, "/opt/todocli")
+  assert.equal(T.settings({ breakColor: "#fff" }).breakColor, "#fff")
+  assert.equal(T.settings(null).workMinutes, 25)
+})
+
+test("sanitizeLabel: controls to space, trim, 120 cap; sanitizeTaskId", () => {
+  assert.equal(T.sanitizeLabel("  a\tb\nc\x00d\x7fe\x85f  "), "a b c d e f")
+  assert.equal(T.sanitizeLabel("x".repeat(200)).length, 120)
+  assert.equal(T.sanitizeLabel(null), "")
+  assert.equal(T.sanitizeLabel(undefined), "")
+  assert.equal(T.sanitizeTaskId(" 12\n"), "12")
+  assert.equal(T.sanitizeTaskId(null), "")
+  assert.equal(T.sanitizeTaskId("a".repeat(100)).length, 64)
+  assert.equal(T.isNumericId("12"), true)
+  assert.equal(T.isNumericId("#12"), false)
+  assert.equal(T.isNumericId(""), false)
+})
+
+test("formatTime: upstream m:ss and h:mm:ss", () => {
+  assert.equal(T.formatTime(0), "0:00")
+  assert.equal(T.formatTime(65), "1:05")
+  assert.equal(T.formatTime(1500), "25:00")
+  assert.equal(T.formatTime(3661), "1:01:01")
+  assert.equal(T.formatTime(-5), "0:00")
+  assert.equal(T.formatTime(3600 + 5 * 60), "1:05:00")
+})
+
+// ------------------------------------------------------ startFor (UX 6.2)
+
+test("startFor: idle attaches and starts work; the record is start --interrupt", () => {
+  const sim = new Sim(CLI)
+  assert.equal(startFor(sim, "3", "Wire the payment-provider webhook"), "started")
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.running, true)
+  assert.equal(sim.state.remaining, 1500)
+  assert.equal(sim.state.endsAt, 1500000)
+  assert.equal(sim.state.taskId, "3")
+  assert.equal(sim.state.taskLabel, "Wire the payment-provider webhook")
+  const r = sim.records()
+  assert.equal(r.length, 1)
+  assert.equal(r[0].verb, "start")
+  assert.equal(r[0].taskId, "3")
+  assert.equal(r[0].planned, 1500)
+  assert.equal(r[0].interrupt, true)
+  assert.equal(r[0].startedAt, null)
+  assert.equal(sim.state.sessionUid, "S" + uidCounter)
+  assert.equal(sim.writes().length >= 1, true)
+})
+
+test("startFor: empty label is refused without a change", () => {
+  const sim = new Sim(CLI)
+  assert.equal(startFor(sim, "3", "  \n "), "empty")
+  assert.equal(sim.state.phase, "idle")
+  assert.equal(sim.records().length, 0)
+})
+
+test("startFor: same task while running is already running; different task retargets (AC-6.13)", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire it")
+  sim.tick(300)
+  sim.clear()
+  const first = sim.state.sessionUid
+  assert.equal(startFor(sim, "3", "Wire it"), "already running")
+  assert.equal(sim.records().length, 0)
+  assert.equal(startFor(sim, "8", "Book dentist"), "retargeted")
+  assert.equal(sim.state.remaining, 1200)
+  assert.equal(sim.state.taskId, "8")
+  assert.equal(sim.state.taskLabel, "Book dentist")
+  assert.equal(sim.state.running, true)
+  const r = sim.records()
+  assert.equal(r.length, 1)
+  assert.equal(r[0].verb, "retarget")
+  assert.equal(r[0].focusSeconds, 300)
+  assert.equal(r[0].taskId, "8")
+  assert.equal(r[0].planned, 1200)
+  assert.equal(r[0].sessionUid, first)
+  const second = sim.state.sessionUid
+  assert.notEqual(second, first)
+  assert.equal(sim.state.focusSeconds, 0)
+  sim.tick(1200)
+  const done = sim.records().find((e) => e.verb === "done")
+  assert.equal(done.sessionUid, second)
+  assert.equal(done.focusSeconds, 1200)
+})
+
+test("startFor: no task id while running retargets the label; the same label is left alone", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "", "Admin")
+  assert.equal(sim.records()[0].taskId, "")
+  assert.equal(sim.records()[0].label, "Admin")
+  sim.tick(10)
+  sim.clear()
+  assert.equal(startFor(sim, "", "Admin"), "already running")
+  assert.equal(startFor(sim, "", "Email"), "retargeted")
+  assert.equal(sim.records()[0].verb, "retarget")
+  assert.equal(sim.records()[0].label, "Email")
+  assert.equal(sim.records()[0].taskId, "")
+})
+
+test("startFor: paused work resumes for the same task and retargets + resumes for another", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire it")
+  sim.tick(100)
+  sim.apply({ type: "pause" })
+  assert.equal(sim.state.running, false)
+  sim.clear()
+  assert.equal(startFor(sim, "3", "Wire it"), "resumed")
+  assert.equal(sim.state.running, true)
+  assert.equal(sim.records().length, 0)
+  sim.apply({ type: "pause" })
+  sim.clear()
+  assert.equal(startFor(sim, "9", "Other"), "retargeted")
+  assert.equal(sim.state.running, true)
+  assert.equal(sim.state.remaining, 1400)
+  assert.equal(sim.verbs()[0], "retarget")
+})
+
+test("startFor: during a break ends the break and starts work, count unchanged", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire it")
+  sim.tick(1500)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.state.completed, 1)
+  sim.tick(30)
+  sim.clear()
+  assert.equal(startFor(sim, "4", "Next"), "started")
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.running, true)
+  assert.equal(sim.state.completed, 1)
+  assert.equal(sim.state.remaining, 1500)
+  assert.deepEqual(sim.verbs(), ["start"])
+  assert.equal(sim.records()[0].taskId, "4")
+})
+
+test("startFor: a non-numeric task id is kept on the timer but recorded by label", () => {
+  const sim = new Sim(CLI)
+  assert.equal(startFor(sim, "t1abc", "Json item"), "started")
+  assert.equal(sim.state.taskId, "t1abc")
+  const argv = T.recordArgv("todocli", sim.records()[0])
+  assert.equal(argv.indexOf("t1abc"), -1)
+  assert.equal(argv.indexOf("--label=Json item") > 0, true)
+})
+
+// ------------------------------------------------ transport replies (A53)
+
+test("start/pause/resume/reset/skip/detach replies and effects", () => {
+  const sim = new Sim(CLI)
+  assert.equal(sim.apply({ type: "pause" }), "idle")
+  assert.equal(sim.apply({ type: "detach" }), "idle")
+  assert.equal(sim.apply({ type: "resume" }), "idle")
+  assert.equal(sim.apply({ type: "skip" }), "ok")
+  assert.equal(sim.apply({ type: "reset" }), "ok")
+  assert.equal(sim.state.phase, "idle")
+  assert.equal(sim.records().length, 0)
+  assert.equal(sim.apply({ type: "toggle" }), "started")
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.records()[0].taskId, "")
+  assert.equal(sim.records()[0].label, "")
+  assert.equal(T.recordArgv("todocli", sim.records()[0]).indexOf("--label=Pomodoro") > 0, true)
+  sim.tick(10)
+  assert.equal(sim.apply({ type: "toggle" }), "paused")
+  assert.equal(sim.state.running, false)
+  assert.equal(sim.state.endsAt, null)
+  assert.equal(sim.apply({ type: "toggle" }), "resumed")
+  assert.equal(sim.state.endsAt, sim.now + 1490 * 1000)
+  assert.equal(sim.apply({ type: "pause" }), "paused")
+  assert.equal(sim.apply({ type: "pause" }), "resumed")
+  assert.equal(sim.apply({ type: "resume" }), "resumed")
+  assert.equal(sim.apply({ type: "pause" }), "paused")
+  assert.equal(sim.apply({ type: "resume" }), "resumed")
+  sim.tick(5)
+  assert.equal(sim.apply({ type: "reset" }), "ok")
+  assert.equal(sim.state.remaining, 1500)
+  assert.equal(sim.state.running, false)
+  assert.equal(sim.state.focusSeconds, 15)
+  assert.equal(sim.apply({ type: "detach" }), "detached")
+  sim.clear()
+  assert.equal(sim.apply({ type: "skip" }), "ok")
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.state.running, true)
+  assert.equal(sim.state.completed, 0)
+  assert.equal(sim.apply({ type: "skip" }), "ok")
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.running, false)
+  assert.equal(sim.apply({ type: "detach" }), "detached")
+})
+
+test("reset while running pauses at the full phase length; a session keeps its seconds", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire it")
+  sim.tick(100)
+  sim.clear()
+  sim.apply({ type: "reset" })
+  assert.equal(sim.state.remaining, 1500)
+  assert.equal(sim.state.running, false)
+  assert.equal(sim.records().length, 0)
+  sim.apply({ type: "resume" })
+  sim.tick(1500)
+  const done = sim.records().find((e) => e.verb === "done")
+  assert.equal(done.focusSeconds, 1600)
+})
+
+// ------------------------------------------------------- AC-6.11 – 6.22
+
+test("AC-6.11 a work phase emits start then done with the running time", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  const uid = sim.state.sessionUid
+  sim.tick(1500)
+  const r = sim.records()
+  assert.deepEqual(r.map((e) => e.verb), ["start", "done"])
+  assert.equal(r[0].taskId, "3")
+  assert.equal(r[0].planned, 1500)
+  assert.equal(r[0].interrupt, true)
+  assert.equal(r[1].focusSeconds, 1500)
+  assert.equal(r[1].sessionUid, uid)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.state.running, true)
+  assert.equal(sim.state.remaining, 300)
+  assert.equal(sim.state.sessionUid, null)
+  const n = sim.notifies()
+  assert.equal(n.length, 1)
+  assert.equal(n[0].argv[5], "Pomodoro complete")
+  assert.equal(n[0].argv[6], "Work session done. Take a short break.\nWire…")
+  assert.deepEqual(n[0].argv.slice(7), ["--exec", "omarchy-shell", "abobreshov.todo", "openTask", "3"])
+  assert.equal(sim.sounds()[0].file, "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga")
+})
+
+// AC-6.12 names 2100 s for the completion; that is 1500 s of work plus the
+// 600 s pause AC-6.3 uses (a 300 s pause would end at 1800 s).
+test("AC-6.12 pauses are excluded from focus seconds", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.tick(600)
+  sim.apply({ type: "pause" })
+  sim.tick(600)
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.remaining, 900)
+  sim.apply({ type: "resume" })
+  sim.tick(900)
+  assert.equal(sim.now, 2100000)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.records().find((e) => e.verb === "done").focusSeconds, 1500)
+})
+
+test("AC-6.14 backend none never records", () => {
+  const sim = new Sim(NONE)
+  startFor(sim, "3", "Wire…")
+  sim.tick(1500)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.records().length, 0)
+  assert.equal(sim.state.sessionUid, null)
+  sim.apply({ type: "skip" })
+  sim.apply({ type: "toggle" })
+  sim.apply({ type: "detach" })
+  assert.equal(sim.records().length, 0)
+  assert.equal(sim.notifies().length, 1)
+})
+
+test("AC-6.15 suspend pauses; it never completes", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.tick(300)
+  assert.equal(sim.state.remaining, 1200)
+  sim.clear()
+  sim.now = 3900000
+  sim.apply({ type: "tick" })
+  assert.equal(sim.state.running, false)
+  assert.equal(sim.state.phase, "work")
+  assert.equal(Math.abs(sim.state.remaining - 1200) <= 1, true)
+  assert.equal(sim.state.focusSeconds, 300)
+  assert.equal(sim.records().length, 0)
+  assert.equal(sim.writes().length, 1)
+  assert.equal(sim.state.endsAt, null)
+  sim.apply({ type: "resume" })
+  sim.tick(1200)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.records().find((e) => e.verb === "done").focusSeconds, 1500)
+})
+
+test("AC-6.16 a failed start is retried at the end of the phase with --started-at", () => {
+  const sim = new Sim(CLI)
+  sim.now = 7000
+  sim.answer = () => ({ exitCode: 1, stderr: "boom\n" })
+  startFor(sim, "3", "Wire…")
+  assert.equal(sim.state.lastRecordError, "todocli error")
+  assert.equal(sim.state.sessionUid, null)
+  assert.equal(sim.state.running, true)
+  sim.answer = okReply
+  sim.clear()
+  sim.tick(1500)
+  const r = sim.records()
+  assert.deepEqual(r.map((e) => e.verb), ["start", "done"])
+  assert.equal(r[0].startedAt, 7000)
+  assert.equal(r[0].taskId, "3")
+  assert.equal(r[0].retry, true)
+  assert.equal(r[1].focusSeconds, 1500)
+  assert.equal(T.recordArgv("todocli", r[0]).join(" "), "/usr/bin/env todocli --source omarchy --json pomodoro start 3 --planned 1500 --started-at 7 --interrupt")
+  assert.equal(sim.state.lastRecordError, null)
+})
+
+test("AC-6.17 skip cancels; detach retargets to Pomodoro and keeps running", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.tick(600)
+  sim.clear()
+  sim.apply({ type: "skip" })
+  assert.equal(sim.records()[0].verb, "cancel")
+  assert.equal(sim.records()[0].focusSeconds, 600)
+  assert.equal(sim.state.phase, "shortBreak")
+  const sim2 = new Sim(CLI)
+  startFor(sim2, "3", "Wire…")
+  sim2.tick(600)
+  sim2.clear()
+  assert.equal(sim2.apply({ type: "detach" }), "detached")
+  const r = sim2.records()
+  assert.equal(r[0].verb, "retarget")
+  assert.equal(r[0].label, "Pomodoro")
+  assert.equal(r[0].taskId, "")
+  assert.equal(r[0].focusSeconds, 600)
+  assert.equal(r[0].planned, null)
+  assert.equal(sim2.state.running, true)
+  assert.equal(sim2.state.taskId, "")
+  assert.equal(sim2.state.taskLabel, "")
+  assert.equal(sim2.state.remaining, 900)
+  sim2.tick(900)
+  assert.equal(sim2.records().find((e) => e.verb === "done").focusSeconds, 900)
+  assert.equal(sim2.notifies()[0].argv.length, 7)
+})
+
+test("detach during a break clears the label without a record", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.tick(1500)
+  sim.clear()
+  assert.equal(sim.apply({ type: "detach" }), "detached")
+  assert.equal(sim.records().length, 0)
+  assert.equal(sim.state.taskLabel, "")
+})
+
+test("AC-6.18 the state file is checkpointed at most once a minute while running", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.clear()
+  sim.tick(150)
+  const w = sim.writes()
+  assert.deepEqual(w.map((e) => e.doc.updatedAt), [60000, 120000])
+  assert.deepEqual(w.map((e) => e.doc.focusSeconds), [60, 120])
+  sim.clear()
+  sim.apply({ type: "pause" })
+  assert.equal(sim.writes().length, 1)
+  assert.equal(sim.writes()[0].doc.focusSeconds, 150)
+  assert.equal(sim.writes()[0].doc.running, false)
+  sim.clear()
+  sim.tick(200)
+  assert.equal(sim.writes().length, 0)
+})
+
+const SAVED = { version: 1, phase: "work", running: true, endsAt: 1000000 + 1122000, remaining: 1122, completed: 2, taskId: "12", taskLabel: "Write UX spec for the panels", sessionUid: "S", focusSeconds: 378, pendingClose: null, updatedAt: 1000000 }
+
+test("AC-6.19 a reload restores the phase paused with its session", () => {
+  const sim = new Sim(CLI, 1000000 + 40000)
+  sim.apply({ type: "serviceStart", saved: SAVED })
+  const s = sim.state
+  assert.equal(s.phase, "work")
+  assert.equal(s.running, false)
+  assert.equal(s.remaining, 1122)
+  assert.equal(s.taskId, "12")
+  assert.equal(s.taskLabel, "Write UX spec for the panels")
+  assert.equal(s.sessionUid, "S")
+  assert.equal(s.focusSeconds, 378)
+  assert.equal(s.completed, 2)
+  assert.equal(s.restored, true)
+  assert.equal(sim.records().length, 0)
+  assert.equal(sim.writes().length, 1)
+  assert.equal(sim.writes()[0].doc.phase, "work")
+  assert.equal(sim.apply({ type: "resume" }), "resumed")
+  assert.equal(sim.state.restored, false)
+  sim.tick(1122)
+  const r = sim.records()
+  assert.deepEqual(r.map((e) => e.verb), ["done"])
+  assert.equal(r[0].sessionUid, "S")
+  assert.equal(r[0].focusSeconds, 1500)
+})
+
+test("AC-6.20 a stale state closes its own session with the checkpoint", () => {
+  const sim = new Sim(CLI, 1000000 + 1122000 + 61000)
+  sim.apply({ type: "serviceStart", saved: SAVED })
+  const r = sim.records()
+  assert.equal(r.length, 1)
+  assert.equal(r[0].verb, "interrupt")
+  assert.equal(r[0].sessionUid, "S")
+  assert.equal(r[0].focusSeconds, 378)
+  assert.equal(sim.state.phase, "idle")
+  assert.equal(sim.state.taskId, "")
+  assert.equal(sim.state.restored, false)
+  assert.equal(sim.writes()[0].doc.phase, "idle")
+  assert.equal(T.recordArgv("todocli", r[0]).join(" "), "/usr/bin/env todocli --source omarchy --json pomodoro interrupt S --focus-seconds 378")
+})
+
+test("restore: invalid, idle or stale-without-session saved states start idle", () => {
+  for (const saved of [null, "junk", { version: 2, phase: "work" }, { version: 1, phase: "idle", completed: 3 }, { version: 1, phase: "work", remaining: 10, updatedAt: 0 }, { version: 1, phase: "bogus", remaining: 10, updatedAt: 999999999 }]) {
+    const sim = new Sim(CLI, 5000000)
+    sim.apply({ type: "serviceStart", saved })
+    assert.equal(sim.state.phase, "idle", JSON.stringify(saved))
+    assert.equal(sim.records().length, 0)
+    assert.equal(sim.writes().length, 1)
+  }
+  const sim = new Sim(CLI, 5000000)
+  sim.apply({ type: "serviceStart", saved: { version: 1, phase: "idle", completed: 3 } })
+  assert.equal(sim.state.completed, 3)
+})
+
+test("restore: a paused break with a label restores paused; the next work start records", () => {
+  const sim = new Sim(CLI, 2000000)
+  sim.apply({ type: "serviceStart", saved: { version: 1, phase: "shortBreak", running: false, endsAt: null, remaining: 100, completed: 1, taskId: "3", taskLabel: "Wire", sessionUid: null, focusSeconds: 0, pendingClose: null, updatedAt: 1999000 } })
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.state.restored, true)
+  sim.apply({ type: "resume" })
+  sim.tick(100)
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.running, false)
+  assert.equal(sim.records().length, 0)
+  sim.apply({ type: "resume" })
+  assert.deepEqual(sim.verbs(), ["start"])
+  assert.equal(sim.records()[0].taskId, "3")
+})
+
+test("restore: a work phase without a session opens one on resume", () => {
+  const sim = new Sim(CLI, 2000000)
+  sim.apply({ type: "serviceStart", saved: { version: 1, phase: "work", running: false, endsAt: null, remaining: 1400, completed: 0, taskId: "3", taskLabel: "Wire", sessionUid: null, focusSeconds: 100, pendingClose: null, updatedAt: 1999000 } })
+  sim.apply({ type: "resume" })
+  assert.deepEqual(sim.verbs(), ["start"])
+})
+
+test("AC-6.21 a failed close is re-sent with its seconds before the next start", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.answer = (e) => (e.verb === "done" ? { exitCode: 1, stderr: "db error\n" } : okReply())
+  sim.tick(1500)
+  assert.deepEqual(sim.state.pendingClose, { verb: "done", sessionUid: "S" + uidCounter, focusSeconds: 1500 })
+  const S = sim.state.pendingClose.sessionUid
+  assert.equal(sim.state.lastRecordError, "todocli error")
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.writes().some((w) => w.doc.pendingClose !== null && w.doc.pendingClose.sessionUid === S), true)
+  sim.answer = okReply
+  sim.clear()
+  sim.tick(300)
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.running, false)
+  assert.equal(sim.records().length, 0)
+  assert.equal(sim.notifies()[0].argv[5], "Break over")
+  assert.equal(sim.notifies()[0].argv[6], "Ready for the next focus session?\nNext: Wire…")
+  assert.deepEqual(sim.notifies()[0].argv.slice(7), ["--exec", "omarchy-shell", "abobreshov.pomodoro", "open"])
+  assert.equal(sim.sounds()[0].file, "/usr/share/sounds/freedesktop/stereo/complete.oga")
+  sim.clear()
+  assert.equal(startFor(sim, "3", "Wire…"), "resumed")
+  const r = sim.records()
+  assert.deepEqual(r.map((e) => e.verb), ["done", "start"])
+  assert.equal(r[0].sessionUid, S)
+  assert.equal(r[0].focusSeconds, 1500)
+  assert.equal(r[0].resend, true)
+  assert.equal(r[1].taskId, "3")
+  assert.equal(r[1].planned, 1500)
+  assert.equal(r[1].interrupt, true)
+  assert.equal(sim.state.pendingClose, null)
+  assert.equal(sim.state.lastRecordError, null)
+})
+
+test("AC-6.21b a lost reply clears on the re-send (exit 0)", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.tick(100)
+  sim.answer = () => ({ exitCode: 75, stderr: "database is busy\n" })
+  sim.apply({ type: "skip" })
+  assert.equal(sim.state.lastRecordError, "database busy")
+  assert.equal(sim.state.pendingClose.verb, "cancel")
+  assert.equal(sim.state.pendingClose.focusSeconds, 100)
+  sim.answer = okReply
+  sim.clear()
+  sim.apply({ type: "skip" })
+  sim.apply({ type: "toggle" })
+  assert.deepEqual(sim.verbs(), ["cancel", "start"])
+  assert.equal(sim.state.lastRecordError, null)
+  assert.equal(sim.state.pendingClose, null)
+})
+
+test("AC-6.22 a re-send answered exit 1 is dropped and the next start runs cleanly", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.answer = (e) => (e.verb === "done" ? { exitCode: 1, stderr: "x" } : okReply())
+  sim.tick(1500)
+  sim.tick(300)
+  sim.answer = (e) => (e.resend ? { exitCode: 1, stderr: "No running pomodoro S.\n" } : okReply())
+  sim.clear()
+  sim.apply({ type: "toggle" })
+  assert.deepEqual(sim.verbs(), ["done", "start"])
+  assert.equal(sim.state.pendingClose, null)
+  assert.equal(sim.state.lastRecordError, "todocli error")
+  assert.equal(sim.state.sessionUid, "S" + uidCounter)
+  sim.answer = okReply
+  sim.tick(1500)
+  assert.equal(sim.verbs().at(-1), "done")
+  assert.equal(sim.state.lastRecordError, null)
+})
+
+test("AC-6.22 start failing twice: no done is ever sent, the next start runs, the error names the loss", () => {
+  const sim = new Sim(CLI)
+  sim.answer = () => ({ exitCode: 127, stderr: "env: todocli: No such file or directory\n" })
+  startFor(sim, "3", "Wire…")
+  assert.equal(sim.state.lastRecordError, "todocli not found")
+  sim.tick(1500)
+  assert.deepEqual(sim.verbs(), ["start", "start"])
+  assert.equal(sim.records()[1].retry, true)
+  assert.equal(sim.state.pendingClose, null)
+  assert.equal(sim.state.lastRecordError, "todocli not found")
+  sim.answer = okReply
+  sim.clear()
+  sim.tick(300)
+  sim.apply({ type: "toggle" })
+  assert.deepEqual(sim.verbs(), ["start"])
+  assert.equal(sim.records()[0].retry, undefined)
+  assert.equal(sim.state.lastRecordError, "todocli not found")
+  sim.tick(1500)
+  assert.equal(sim.verbs().at(-1), "done")
+  assert.equal(sim.state.lastRecordError, null)
+})
+
+test("a pendingClose without a sessionUid is dropped into lastRecordError before the start", () => {
+  const sim = new Sim(CLI, 2000000)
+  sim.apply({ type: "serviceStart", saved: { version: 1, phase: "idle", pendingClose: { verb: "done", sessionUid: null, focusSeconds: 900 }, updatedAt: 1000 } })
+  assert.equal(sim.state.pendingClose.sessionUid, null)
+  sim.apply({ type: "toggle" })
+  assert.deepEqual(sim.verbs(), ["start"])
+  assert.equal(sim.state.pendingClose, null)
+  assert.equal(sim.state.lastRecordError, "todocli error")
+})
+
+test("a stale restore keeps a pendingClose for the next start", () => {
+  const sim = new Sim(CLI, 1000000 + 1122000 + 61000)
+  sim.apply({ type: "serviceStart", saved: Object.assign({}, SAVED, { pendingClose: { verb: "cancel", sessionUid: "P", focusSeconds: 5 } }) })
+  assert.deepEqual(sim.verbs(), ["interrupt"])
+  sim.apply({ type: "toggle" })
+  assert.deepEqual(sim.verbs(), ["interrupt", "cancel", "start"])
+  assert.equal(sim.records()[1].sessionUid, "P")
+})
+
+test("records are a FIFO: a close waits for the start reply and takes its uid", () => {
+  const sim = new Sim(CLI)
+  const pending = []
+  sim.answer = (e) => { pending.push(e); return null }
+  startFor(sim, "3", "Wire…")
+  sim.tick(60)
+  sim.apply({ type: "skip" })
+  assert.deepEqual(sim.verbs(), ["start"])
+  assert.equal(sim.state.sessionUid, null)
+  sim.reply(pending.shift(), okReply())
+  assert.deepEqual(sim.verbs(), ["start", "cancel"])
+  assert.equal(sim.records()[1].sessionUid, "S" + uidCounter)
+  sim.reply(pending.shift(), { exitCode: 0, stdout: "" })
+  assert.equal(sim.state.sessionUid, null)
+  assert.equal(sim.state.lastRecordError, null)
+})
+
+test("a start answered without a session object counts as a failure and is retried", () => {
+  const sim = new Sim(CLI)
+  sim.answer = (e) => (e.retry ? okReply() : { exitCode: 0, stdout: "not json" })
+  startFor(sim, "3", "Wire…")
+  assert.equal(sim.state.lastRecordError, "todocli error")
+  sim.tick(1500)
+  assert.deepEqual(sim.verbs(), ["start", "start", "done"])
+})
+
+test("a failed retarget keeps the old session; a failed interrupt only reports", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.tick(10)
+  sim.answer = () => ({ exitCode: 1, exitStatus: 1 })
+  startFor(sim, "4", "Other")
+  assert.equal(sim.state.sessionUid, "S" + uidCounter)
+  assert.equal(sim.state.lastRecordError, "todocli error")
+  const sim2 = new Sim(CLI, 1000000 + 1122000 + 61000)
+  sim2.answer = () => ({ exitCode: 1 })
+  sim2.apply({ type: "serviceStart", saved: SAVED })
+  assert.equal(sim2.state.lastRecordError, "todocli error")
+  assert.equal(sim2.state.phase, "idle")
+})
+
+test("a work start clears a stale failed-start retry from an unrecorded phase", () => {
+  const sim = new Sim(CLI)
+  sim.answer = () => ({ exitCode: 1 })
+  startFor(sim, "3", "Wire…")
+  assert.notEqual(sim.state.failedStart, null)
+  sim.cfg = NONE
+  sim.tick(1500)
+  sim.tick(300)
+  sim.cfg = CLI
+  sim.answer = okReply
+  sim.clear()
+  sim.apply({ type: "toggle" })
+  assert.deepEqual(sim.verbs(), ["start"])
+  assert.equal(sim.state.failedStart, null)
+})
+
+test("tick while idle or paused changes nothing", () => {
+  const sim = new Sim(CLI)
+  sim.tick(5)
+  assert.equal(sim.state.phase, "idle")
+  assert.equal(sim.effects.length, 0)
+  startFor(sim, "3", "Wire…")
+  sim.apply({ type: "pause" })
+  sim.clear()
+  sim.tick(5)
+  assert.equal(sim.effects.length, 0)
+  assert.equal(sim.state.focusSeconds, 0)
+})
+
+test("focus seconds add min(2, Δt) per tick; break time is not focus time", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire…")
+  sim.now += 4000
+  sim.apply({ type: "tick" })
+  assert.equal(sim.state.focusSeconds, 2)
+  assert.equal(sim.state.remaining, 1496)
+  sim.now += 1500
+  sim.apply({ type: "tick" })
+  assert.equal(sim.state.focusSeconds, 3.5)
+  sim.apply({ type: "skip" })
+  assert.equal(sim.records().at(-1).focusSeconds, 4)
+  sim.tick(10)
+  assert.equal(sim.state.focusSeconds, 0)
+})
+
+test("long break after pomodorosPerCycle; the count resets after it", () => {
+  const sim = new Sim(T.settings({ backend: "cli", pomodorosPerCycle: 2, workMinutes: 1, shortBreakMinutes: 1, longBreakMinutes: 2 }))
+  sim.apply({ type: "toggle" })
+  sim.tick(60)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.state.completed, 1)
+  sim.tick(60)
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.running, false)
+  sim.apply({ type: "toggle" })
+  sim.tick(60)
+  assert.equal(sim.state.phase, "longBreak")
+  assert.equal(sim.state.completed, 2)
+  assert.equal(sim.state.remaining, 120)
+  assert.equal(sim.notifies().at(-1).argv[6], "Long break — you earned it.")
+  sim.tick(120)
+  assert.equal(sim.state.phase, "work")
+  assert.equal(sim.state.completed, 0)
+})
+
+test("sound effects are omitted when sound is off", () => {
+  const sim = new Sim(T.settings({ sound: "false", workMinutes: 1 }))
+  sim.apply({ type: "toggle" })
+  sim.tick(60)
+  assert.equal(sim.notifies().length, 1)
+  assert.equal(sim.sounds().length, 0)
+})
+
+test("unknown events are ignored", () => {
+  const sim = new Sim(CLI)
+  assert.equal(sim.apply({ type: "bogus" }), "")
+  assert.equal(sim.apply({}), "")
+  assert.equal(sim.effects.length, 0)
+  sim.apply({ type: "recordResult", id: 99, exitCode: 0, exitStatus: 0, stdout: "", stderr: "" })
+  assert.equal(sim.state.lastRecordError, null)
+})
+
+// ------------------------------------------------------ notifications (5.3)
+
+test("notifyCopy: table 5.3 and a hostile label stay one element (A23)", () => {
+  const hostile = "-u critical; rm -rf ~"
+  const c = T.notifyCopy("workEnd", hostile, "12", "abobreshov.todo")
+  assert.equal(c.headline, "Pomodoro complete")
+  assert.equal(c.body, "Work session done. Take a short break.\n" + hostile)
+  assert.deepEqual(c.exec, ["omarchy-shell", "abobreshov.todo", "openTask", "12"])
+  const argv = T.notifyArgv("/usr/share/omarchy", "󰅶", c)
+  assert.deepEqual(argv, ["/usr/share/omarchy/bin/omarchy-notification-send", "-g", "󰅶", "-u", "normal", "Pomodoro complete", "Work session done. Take a short break.\n" + hostile, "--exec", "omarchy-shell", "abobreshov.todo", "openTask", "12"])
+  assert.equal(argv.indexOf(hostile) >= 0, false)
+  assert.equal(argv.filter((a) => a.indexOf(hostile) >= 0).length, 1)
+  assert.deepEqual(T.notifyCopy("longBreak", "", "", "abobreshov.todo"), { headline: "Pomodoro complete", body: "Long break — you earned it.", exec: null })
+  assert.deepEqual(T.notifyCopy("workEnd", "Task", "t1x", "abobreshov.todo").exec, null)
+  assert.deepEqual(T.notifyCopy("workEnd", "Task", "", "abobreshov.todo").exec, null)
+  assert.deepEqual(T.notifyCopy("breakEnd", "Task", "3", "abobreshov.todo"), { headline: "Break over", body: "Ready for the next focus session?\nNext: Task", exec: ["omarchy-shell", "abobreshov.pomodoro", "open"] })
+  assert.deepEqual(T.notifyCopy("breakEnd", "", "", "abobreshov.todo"), { headline: "Break over", body: "Ready for the next focus session?", exec: ["omarchy-shell", "abobreshov.pomodoro", "open"] })
+  assert.equal(T.notifyArgv("", "x", T.notifyCopy("breakEnd", "", "", ""))[0], "/usr/share/omarchy/bin/omarchy-notification-send")
+})
+
+// --------------------------------------------------------- record argv (7.6)
+
+test("recordArgv: every verb, env prefix, attached --label, one element per value", () => {
+  const p = ["/usr/bin/env", "/opt/todocli", "--source", "omarchy", "--json", "pomodoro"]
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "start", taskId: "3", label: "L", planned: 1500, interrupt: true, startedAt: null }), p.concat(["start", "3", "--planned", "1500", "--interrupt"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "start", taskId: "", label: "--json x", planned: 60, interrupt: true, startedAt: 1700000000999 }), p.concat(["start", "--label=--json x", "--planned", "60", "--started-at", "1700000000", "--interrupt"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "done", sessionUid: "S", focusSeconds: 12.6 }), p.concat(["done", "S", "--focus-seconds", "13"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "cancel", sessionUid: "S", focusSeconds: -1 }), p.concat(["cancel", "S", "--focus-seconds", "0"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "retarget", sessionUid: "S", taskId: "8", label: "x", focusSeconds: 300, planned: 1200 }), p.concat(["retarget", "S", "8", "--focus-seconds", "300", "--planned", "1200"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "retarget", sessionUid: "S", taskId: "", label: "Pomodoro", focusSeconds: 600, planned: null }), p.concat(["retarget", "S", "--label=Pomodoro", "--focus-seconds", "600"]))
+  assert.deepEqual(T.recordArgv("/opt/todocli", { verb: "interrupt", sessionUid: "S", focusSeconds: 378 }), p.concat(["interrupt", "S", "--focus-seconds", "378"]))
+  assert.deepEqual(T.recordArgv("", { verb: "interrupt", sessionUid: "S", focusSeconds: 1 })[1], "todocli")
+})
+
+test("classifyExit and parseSession", () => {
+  assert.equal(T.classifyExit(0, 0), null)
+  assert.equal(T.classifyExit(127, 0), "todocli not found")
+  assert.equal(T.classifyExit(75, 0), "database busy")
+  assert.equal(T.classifyExit(1, 0), "todocli error")
+  assert.equal(T.classifyExit(0, 1), "todocli error")
+  assert.equal(T.classifyExit(11, 1), "todocli error")
+  assert.deepEqual(T.parseSession(SESSION("U1")).uid, "U1")
+  assert.equal(T.parseSession(""), null)
+  assert.equal(T.parseSession("{"), null)
+  assert.equal(T.parseSession("[1]"), null)
+  assert.equal(T.parseSession('{"uid": ""}'), null)
+  assert.equal(T.parseSession('{"uid": 5}'), null)
+  assert.equal(T.parseSession('{"ok":false,"error":"x","code":1}'), null)
+})
+
+// --------------------------------------------------- status and state file
+
+test("statusJson has the §7.4 shape; remaining is live while running", () => {
+  const sim = new Sim(CLI)
+  startFor(sim, "3", "Wire it")
+  sim.tick(10)
+  const s = JSON.parse(T.statusJson(sim.state, CLI, sim.now + 2500))
+  assert.deepEqual(Object.keys(s), ["version", "backend", "cliPath", "phase", "running", "remaining", "endsAt", "completed", "taskId", "label", "sessionUid", "lastRecordError", "restored"])
+  assert.equal(s.version, 1)
+  assert.equal(s.backend, "cli")
+  assert.equal(s.cliPath, "todocli")
+  assert.equal(s.phase, "work")
+  assert.equal(s.running, true)
+  assert.equal(s.remaining, 1488)
+  assert.equal(s.endsAt, 1500000)
+  assert.equal(s.taskId, "3")
+  assert.equal(s.label, "Wire it")
+  assert.equal(s.sessionUid, "S" + uidCounter)
+  assert.equal(s.lastRecordError, null)
+  assert.equal(s.restored, false)
+  sim.apply({ type: "pause" })
+  assert.equal(JSON.parse(T.statusJson(sim.state, CLI, sim.now + 99000)).remaining, 1490)
+  assert.equal(JSON.parse(T.statusJson(T.initialState(), NONE)).remaining, 0)
+})
+
+test("stateFileDoc has the A22 shape and parseStateFile round-trips and validates", () => {
+  const sim = new Sim(CLI, 5000)
+  startFor(sim, "3", "Wire it")
+  sim.now += 1500
+  const doc = T.stateFileDoc(sim.state, sim.now)
+  assert.deepEqual(Object.keys(doc), ["version", "phase", "running", "endsAt", "remaining", "completed", "taskId", "taskLabel", "sessionUid", "focusSeconds", "pendingClose", "updatedAt"])
+  assert.equal(doc.updatedAt, 6500)
+  assert.equal(doc.endsAt, 1505000)
+  const back = T.parseStateFile(JSON.stringify(doc))
+  assert.deepEqual(back, doc)
+  assert.equal(T.parseStateFile(""), null)
+  assert.equal(T.parseStateFile("{"), null)
+  assert.equal(T.parseStateFile("[]"), null)
+  assert.equal(T.parseStateFile("null"), null)
+  assert.equal(T.parseStateFile('{"version":2}'), null)
+  const loose = T.parseStateFile('{"version":1,"phase":"work","running":"yes","endsAt":"x","remaining":"12.7","completed":-2,"taskId":5,"taskLabel":"a\\u0000b","sessionUid":7,"focusSeconds":"3","pendingClose":{"verb":"nope","sessionUid":"S","focusSeconds":1},"updatedAt":"9"}')
+  assert.deepEqual(loose, { version: 1, phase: "work", running: false, endsAt: null, remaining: 12, completed: 0, taskId: "5", taskLabel: "a b", sessionUid: null, focusSeconds: 3, pendingClose: null, updatedAt: 9 })
+  const pc = T.parseStateFile('{"version":1,"phase":"idle","pendingClose":{"verb":"cancel","sessionUid":"S","focusSeconds":"4.4"}}')
+  assert.deepEqual(pc.pendingClose, { verb: "cancel", sessionUid: "S", focusSeconds: 4 })
+  assert.equal(pc.updatedAt, null)
+  assert.equal(pc.remaining, 0)
+  assert.equal(T.parseStateFile('{"version":1,"phase":"idle","pendingClose":"x"}').pendingClose, null)
+  assert.equal(T.parseStateFile('{"version":1,"phase":"idle","pendingClose":{"verb":"done","sessionUid":"","focusSeconds":1}}').pendingClose.sessionUid, null)
+  assert.equal(T.parseStateFile('{"version":1,"phase":"idle","sessionUid":"  U  "}').sessionUid, "U")
+})
+
+// ------------------------------------------------- view, tooltip, pill (5.1)
+
+test("view and tooltip per UX 5.1; hint per 5.2", () => {
+  const sim = new Sim(CLI)
+  let v = T.view(sim.state, CLI)
+  assert.equal(v.tooltip, "Pomodoro — click to start")
+  assert.equal(v.phaseLabel, "Pomodoro")
+  assert.equal(v.phaseGlyph, "")
+  assert.equal(v.hasSession, false)
+  assert.equal(v.playing, false)
+  assert.equal(v.displaySeconds, 1500)
+  assert.equal(v.timeText, "25:00")
+  assert.equal(v.remainingText, "0:00")
+  assert.equal(v.progress, 1) // upstream: remainingSeconds 0 at idle fills the bar
+  assert.equal(v.hint, "Space start · R reset · S skip")
+  assert.equal(v.attached, false)
+  startFor(sim, "3", "Write UX spec for the panels")
+  sim.tick(378)
+  v = T.view(sim.state, CLI)
+  assert.equal(v.tooltip, "Work — 18:42\nWrite UX spec for the panels")
+  assert.equal(v.hint, "Space start · R reset · S skip · X detach")
+  assert.equal(v.attached, true)
+  assert.equal(v.playing, true)
+  assert.equal(v.isBreak, false)
+  assert.equal(v.phaseSeconds, 1500)
+  assert.equal(Math.round(v.progress * 1000), 252)
+  assert.equal(v.timeText, "18:42")
+  sim.apply({ type: "pause" })
+  v = T.view(sim.state, CLI)
+  assert.equal(v.tooltip, "Work — paused\nWrite UX spec for the panels")
+  assert.equal(v.playing, false)
+  sim.apply({ type: "resume" })
+  sim.tick(1122)
+  sim.tick(110)
+  v = T.view(sim.state, CLI)
+  assert.equal(v.tooltip, "Short break — 3:10\nNext: Write UX spec for the panels")
+  assert.equal(v.isBreak, true)
+  assert.equal(v.phaseGlyph, "󰅶")
+  assert.equal(v.phaseLabel, "Short break")
+  assert.equal(v.phaseSeconds, 300)
+  assert.equal(v.completed, 1)
+  assert.equal(v.perCycle, 4)
+  sim.apply({ type: "pause" })
+  assert.equal(T.view(sim.state, CLI).tooltip, "Short break — paused\nNext: Write UX spec for the panels")
+  sim.apply({ type: "detach" })
+  assert.equal(T.view(sim.state, CLI).tooltip, "Short break — paused")
+  assert.equal(T.view(sim.state, CLI).hint, "Space start · R reset · S skip")
+  startFor(sim, "5", "<img src=x> <b>x</b>")
+  assert.equal(T.view(sim.state, CLI).tooltip, "Work — 25:00\n‹img src=x› ‹b›x‹/b›")
+  assert.equal(T.view(sim.state, CLI).taskLabel, "<img src=x> <b>x</b>")
+  assert.equal(T.tooltipText("a<b>c"), "a‹b›c")
+  const s2 = new Sim(T.settings({ pomodorosPerCycle: 2, workMinutes: 1, shortBreakMinutes: 1, longBreakMinutes: 3 }))
+  s2.apply({ type: "toggle" }); s2.tick(60); s2.tick(60); s2.apply({ type: "toggle" }); s2.tick(60)
+  const lv = T.view(s2.state, s2.cfg)
+  assert.equal(lv.phaseLabel, "Long break")
+  assert.equal(lv.phaseSeconds, 180)
+  assert.equal(lv.tooltip, "Long break — 3:00")
+  assert.equal(T.view(Object.assign(T.initialState(), { phase: "work", remaining: 0 }), T.settings({ workMinutes: "x" })).progress, 1)
+  assert.equal(T.view(Object.assign(T.initialState(), { phase: "work", remaining: 10 }), T.settings({})).progress, 1 - 10 / 1500)
+})
+
+test("pillLayout: horizontal keeps upstream size; vertical is barSize × iconSlot, glyph only", () => {
+  assert.deepEqual(T.pillLayout(false, { barSize: 26, iconSlot: 27, pillWidth: 56 }), { width: 56, height: 26, showTime: true })
+  assert.deepEqual(T.pillLayout(true, { barSize: 28, iconSlot: 27, pillWidth: 56 }), { width: 28, height: 27, showTime: false })
+})
+
+test("captions: record error and restored copy (UX 5.2)", () => {
+  assert.equal(T.recordCaption(null), "")
+  assert.equal(T.recordCaption("database busy"), "Last session not recorded: database busy.")
+  assert.equal(T.restoredCaption(true), "Restored after a reload · Space resumes")
+  assert.equal(T.restoredCaption(false), "")
+})
