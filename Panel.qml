@@ -11,8 +11,9 @@ import "Timer.js" as TimerLib
 // Upstream's popup: phase label with pomodoro count dots, a large remaining
 // time readout, a progress bar, transport buttons and the key hint. The fork
 // adds one task line (only while a task is attached), two captions and `x`
-// to detach. Keyboard: Space start/pause, R reset, S skip, X detach, Tab
-// switches panels, Esc closes. Every action goes to the service.
+// to detach. Keyboard: Space start/pause, R reset (back to idle, no task),
+// S skip, X detach, Tab switches panels, Esc closes. Every action goes to
+// the service.
 Panel {
   id: root
   moduleName: TimerLib.TARGET
@@ -256,7 +257,7 @@ Panel {
 
           PanelActionButton {
             iconText: "\uf0e2" // fa-undo
-            tooltipText: "Reset phase (R)"
+            tooltipText: "Reset to idle (R)"
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily
             enabled: root.view.hasSession

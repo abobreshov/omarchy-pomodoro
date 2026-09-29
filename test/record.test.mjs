@@ -77,6 +77,33 @@ test("retarget, detach and skip carry the uid the fake returned", () => {
   assert.equal(sim.state.sessionUid, null)
 })
 
+test("reset cancels a running work session through the fake todocli; a break reset sends nothing", () => {
+  const log = tmpLog()
+  const sim = fakeSim(T.settings({ backend: "cli", cliPath: FAKE }), { FAKE_LOG: log })
+  sim.apply({ type: "startFor", taskId: "3", label: "Wire" })
+  const uid = sim.state.sessionUid
+  sim.tick(120)
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.equal(sim.state.phase, "idle")
+  assert.equal(sim.state.taskId, "")
+  assert.equal(sim.state.sessionUid, null)
+  assert.equal(sim.state.lastRecordError, null)
+  let calls = logLines(log).map((c) => c.argv.slice(4))
+  assert.deepEqual(calls, [["start", "3", "--planned", "1500", "--interrupt"], ["cancel", uid, "--focus-seconds", "120"]])
+  // A fresh phase after the reset opens a new session; reset in its break records nothing more.
+  assert.equal(sim.apply({ type: "toggle" }), "started")
+  const uid2 = sim.state.sessionUid
+  assert.notEqual(uid2, uid)
+  sim.tick(1500)
+  assert.equal(sim.state.phase, "shortBreak")
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.equal(sim.apply({ type: "reset" }), "idle")
+  calls = logLines(log).map((c) => c.argv.slice(4))
+  assert.equal(calls.length, 4)
+  assert.deepEqual(calls[2], ["start", "--label=Pomodoro", "--planned", "1500", "--interrupt"])
+  assert.deepEqual(calls[3], ["done", uid2, "--focus-seconds", "1500"])
+})
+
 test("a missing cliPath maps to todocli not found through env's exit 127; 75 is database busy", () => {
   const results = []
   const sim = fakeSim(T.settings({ backend: "cli", cliPath: "/nonexistent/dir/todocli-xyz" }), {}, results)

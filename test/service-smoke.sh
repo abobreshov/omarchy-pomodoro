@@ -6,8 +6,9 @@
 #
 # Drives the IPC target and checks: registration and typed functions, the
 # 0700 state directory (pre-created 0755, so the mode must be fixed before
-# the first write) and the state file, start/pause/skip/detach/reset
-# replies, the records the fake todocli received (uid round trip), a full
+# the first write) and the state file, start/pause/skip/detach replies,
+# reset back to idle from work (the cancel record) and from a break (no
+# record), the records the fake todocli received (uid round trip), a full
 # 1-minute work phase (done record + notification argv), restore of a fresh
 # state (paused, restored true) and the interrupt of a stale one. Settings
 # reach the service the way the shell delivers them: a `shell` object whose
@@ -89,9 +90,17 @@ check "detach -> detached" "[[ \$(ipc detach) == detached ]]"
 sleep 1
 check "detach record" "[[ \"\$(records)\" == *'retarget $uid2 --label=Pomodoro --focus-seconds '* ]]"
 check "label cleared" "[[ \$(status label) == '' ]]"
-check "reset -> ok, paused at 1:00" "[[ \$(ipc reset) == ok && \$(status remaining) == 60 && \$(status running) == False ]]"
-check "start -> resumed" "[[ \$(ipc start) == resumed ]]"
+uidd=$(status sessionUid)
+check "detach retarget gave the unlinked session a new uid" "[[ '$uidd' == 01FAKE* && '$uidd' != '$uid2' ]]"
+check "reset -> reset, idle with no task" "[[ \$(ipc reset) == reset && \$(status phase) == idle && \$(status running) == False && \$(status taskId) == '' && \$(status sessionUid) == None ]]"
+sleep 1
+check "reset cancel record with the session's uid" "[[ \"\$(records)\" == *'cancel $uidd --focus-seconds '* ]]"
+check "state file idle after reset, no session" "[[ \$(state phase) == idle && \$(state sessionUid) == None && \$(state taskId) == '' ]]"
+check "reset while idle -> idle" "[[ \$(ipc reset) == idle ]]"
+check "start -> started" "[[ \$(ipc start) == started ]]"
+sleep 1
 uid3=$(status sessionUid)
+check "fresh session after the reset" "[[ '$uid3' == 01FAKE* && '$uid3' != '$uid2' ]]"
 check "skip -> ok, break" "[[ \$(ipc skip) == ok && \$(status phase) == shortBreak ]]"
 sleep 1
 check "skip cancel record" "[[ \"\$(records)\" == *'cancel $uid3 --focus-seconds '* ]]"
@@ -108,6 +117,10 @@ check "notification argv: -g glyph -u normal, constant headline" "grep -qF -- \$
 # opens line 2, followed by the --exec words as separate argv elements.
 check "notification label on its own line, --exec tail as separate words" "grep -qF -- \$'Phase two\x1f--exec\x1fomarchy-shell\x1fabobreshov.todo\x1fopenTask\x1f5' '$nlog' && [[ \$(grep -c . '$nlog') -eq 2 ]]"
 check "lastRecordError null" "[[ \$(status lastRecordError) == None ]]"
+nrec=$(grep -c . "$log")
+check "reset from the break -> idle, task dropped, count kept" "[[ \$(ipc reset) == reset && \$(status phase) == idle && \$(status label) == '' && \$(status completed) == 1 ]]"
+sleep 1
+check "reset from a break records nothing" "[[ \$(grep -c . '$log') -eq $nrec ]]"
 stop
 
 echo "== restore a fresh state"

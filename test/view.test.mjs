@@ -92,6 +92,31 @@ test("view and tooltip per UX 5.1; hint per 5.2", () => {
   assert.equal(T.view(Object.assign(T.initialState(), { phase: "work", remaining: 10 }), T.settings({})).progress, 1 - 10 / 1500)
 })
 
+test("after a reset the pill and status are idle: stopwatch glyph, upstream idle tooltip, no task", () => {
+  const sim = newSim(CLI)
+  startFor(sim, "3", "Wire it")
+  sim.tick(1500)
+  sim.tick(10)
+  assert.equal(T.view(sim.state, CLI).phaseGlyph, "󰅶")
+  sim.apply({ type: "reset" })
+  const v = T.view(sim.state, CLI)
+  const idle = T.idleView()
+  for (const k of ["isBreak", "hasSession", "playing", "phaseGlyph", "phaseLabel", "progress", "timeText", "remainingText", "tooltip", "hint", "attached", "taskLabel", "restored", "restoredCaption"]) assert.deepEqual(v[k], idle[k], k)
+  assert.equal(v.phaseGlyph, "")
+  assert.equal(v.tooltip, "Pomodoro — click to start")
+  assert.equal(v.completed, 1)
+  assert.deepEqual(T.pillLayout(false, { barSize: 26, iconSlot: 27, pillWidth: 56 }, v).opacity, 0.7)
+  const s = JSON.parse(T.statusJson(sim.state, CLI, sim.now + 5000))
+  assert.equal(s.phase, "idle")
+  assert.equal(s.running, false)
+  assert.equal(s.remaining, 0)
+  assert.equal(s.endsAt, null)
+  assert.equal(s.taskId, "")
+  assert.equal(s.label, "")
+  assert.equal(s.sessionUid, null)
+  assert.equal(s.completed, 1)
+})
+
 test("pillLayout: horizontal keeps upstream size and dims idle; vertical is barSize × iconSlot, glyph only, dims unless playing", () => {
   const m = { barSize: 26, iconSlot: 27, pillWidth: 56 }
   const idle = T.idleView()

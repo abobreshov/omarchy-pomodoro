@@ -189,6 +189,53 @@ test("AC-6.22 start failing twice: no done is ever sent, the next start runs, th
   assert.equal(sim.state.lastRecordError, null)
 })
 
+test("reset after a failed start retries the start with --started-at, then cancels (the skip path)", () => {
+  const sim = newSim(CLI)
+  sim.now = 9000
+  sim.answer = () => ({ exitCode: 1, stderr: "boom\n" })
+  startFor(sim, "3", "Wire…")
+  assert.equal(sim.state.lastRecordError, "todocli error")
+  let opened = null
+  sim.answer = (e) => { const r = fake.ok(); if (e.verb === "start") opened = T.parseSession(r.stdout).uid; return r }
+  sim.clear()
+  sim.tick(45)
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  const r = sim.records()
+  assert.deepEqual(r.map((e) => e.verb), ["start", "cancel"])
+  assert.equal(r[0].retry, true)
+  assert.equal(r[0].startedAt, 9000)
+  assert.equal(r[1].sessionUid, opened)
+  assert.equal(r[1].focusSeconds, 45)
+  assert.equal(sim.state.phase, "idle")
+  assert.equal(sim.state.failedStart, null)
+  assert.equal(sim.state.lastRecordError, null)
+  assert.equal(sim.state.inflight, null)
+})
+
+test("a cancel that fails on reset is kept as a pending close in the idle state file and re-sent before the next start", () => {
+  const sim = newSim(CLI)
+  startFor(sim, "3", "Wire…")
+  const uid = sim.state.sessionUid
+  sim.tick(30)
+  sim.answer = () => ({ exitCode: 1, stderr: "db error\n" })
+  sim.clear()
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.deepEqual(sim.state.pendingClose, { verb: "cancel", sessionUid: uid, focusSeconds: 30 })
+  assert.equal(sim.state.phase, "idle")
+  const kept = sim.writes().find((w) => w.doc.pendingClose !== null).doc
+  assert.equal(kept.phase, "idle")
+  assert.equal(kept.sessionUid, null)
+  assert.deepEqual(kept.pendingClose, { verb: "cancel", sessionUid: uid, focusSeconds: 30 })
+  sim.answer = fake.ok
+  sim.clear()
+  assert.equal(startFor(sim, "4", "Next"), "started")
+  assert.deepEqual(sim.verbs(), ["cancel", "start"])
+  assert.equal(sim.records()[0].sessionUid, uid)
+  assert.equal(sim.records()[0].resend, true)
+  assert.equal(sim.state.pendingClose, null)
+  assert.equal(sim.state.lastRecordError, null)
+})
+
 test("a work start clears a stale failed-start retry from an unrecorded phase", () => {
   const sim = newSim(CLI)
   sim.answer = () => ({ exitCode: 1 })

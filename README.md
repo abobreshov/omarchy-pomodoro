@@ -20,7 +20,8 @@ under [Deviations from upstream](#deviations-from-upstream).
 - **Popup** — phase label with pomodoro count dots, a large remaining-time
   readout, a progress bar, and transport buttons. While a task is attached
   the popup shows its title on a line of its own with a detach button.
-  Keyboard: Space start/pause, R reset, S skip, X detach, Esc close.
+  Keyboard: Space start/pause, R reset (back to idle, no task), S skip,
+  X detach, Esc close.
 - **Notifications + sound** — phase completion fires a desktop notification
   and plays a system sound (`alarm-clock-elapsed` after work, `complete`
   after a break). With a task attached, its title goes on the second line
@@ -81,8 +82,9 @@ omarchy bar set abobreshov.pomodoro backend cli
 
 - Bar pill: left = popup, middle = start/pause, tooltip shows phase + time
   (and the attached task on a second line).
-- Popup: Space start/pause, R reset, S skip, X detach the task, Tab moves to
-  the neighboring bar panel, Esc closes.
+- Popup: Space start/pause, R reset (abandons the phase: idle, no task),
+  S skip, X detach the task, Tab moves to the neighboring bar panel, Esc
+  closes.
 
 ### IPC
 
@@ -95,7 +97,8 @@ omarchy bar set abobreshov.pomodoro backend cli
 | `pause` | `paused` / `resumed` / `idle` |
 | `startFor <taskId> <label>` | `started`, `retargeted`, `resumed`, `already running` or `empty`. `taskId` may be `""` for a free-text label. Idle or in a break: starts a work phase attached to the task. Running on another task: keeps the remaining time and attaches the new task (the record splits). Paused: resumes. The label is sanitised (control characters become spaces, trimmed, at most 120 characters). |
 | `detach` | `detached` / `idle` |
-| `skip`, `reset` | `ok` |
+| `skip` | `ok`. Work: the session is cancelled and a short break starts running; break: a work phase, paused. |
+| `reset` | `reset` / `idle`. The popup's `R`. Back to idle with no task from any phase: a recorded work session is cancelled first (`todocli pomodoro cancel <uid> --focus-seconds <n>`, the same path as `skip`, so todocli sees it); a break or a work phase that opened no session records nothing. The state file is written idle (no task, no session), the pill shows the idle glyph; the pomodoro count and a pending close are kept. |
 | `status` | one JSON line: `{version, backend, cliPath, phase, running, remaining, endsAt, completed, taskId, label, sessionUid, lastRecordError, restored}` |
 
 The todo plugin (`abobreshov.todo`) calls `startFor` when you press `p` on a
@@ -140,13 +143,15 @@ is planned, not published yet):
 | Work phase starts running | `start <id>` or `start --label=<label>`, `--planned <workMinutes × 60> --interrupt` |
 | Work phase reaches 0:00 | `done <uid> --focus-seconds <n>` |
 | Skip during work | `cancel <uid> --focus-seconds <n>` |
+| Reset (`R`, IPC `reset`) during work | `cancel <uid> --focus-seconds <n>`, then idle with no task |
 | `startFor` another task during work | `retarget <uid> <id> --focus-seconds <n> --planned <remaining>` |
 | Detach (`x`) | `retarget <uid> --label=Pomodoro --focus-seconds <n>` |
 | Stale state at service start | `interrupt <uid> --focus-seconds <checkpoint>` |
 
 `<n>` is the running time of the session: pauses and suspends are excluded.
-Reset keeps the session and its seconds. Timer sessions started with no task
-are recorded with `--label`.
+A reset during a break, or during a work phase that opened no session (one a
+break was skipped into and never resumed), records nothing. Timer sessions
+started with no task are recorded with `--label`.
 
 Recording never stops the timer. A failed call shows
 `Last session not recorded: <reason>.` under the task line (`todocli not
@@ -226,6 +231,7 @@ MIT. Upstream copyright (c) 2026 markbus-ai; modifications copyright (c)
 | Suspend detected and treated as a pause | A deadline alone would complete the phase on wake and record time nobody worked |
 | State file, checkpointed once a minute, with restore-paused on startup and `keepLoaded: true` | Hand-off to the todo panel without polling; a reload must not end a phase or lose its task |
 | New IPC: `start`, `pause`, `startFor`, `detach`, `skip`, `reset`, `status` | Scripts and the todo panel drive and read the timer |
+| `R` / `reset` returns to idle with no task (upstream restored the phase length and stayed in the phase) | After a skip or a cancelled session the timer sat in a paused phase with no way back to idle, so a task or a break could only be left behind by starting another work phase; a recorded session is cancelled first so todocli agrees |
 | Vertical bars: glyph only, one icon slot high | Upstream's 56 px pill overflows a 28 px vertical bar |
 | `license` key in the manifest | Upstream's manifest had none; the LICENSE file says MIT |
 | `Layout.alignment: Qt.AlignVCenter` on the popup's phase-row texts instead of `anchors.verticalCenter` | Anchors on `RowLayout` children are undefined behaviour in Qt and warn at runtime |

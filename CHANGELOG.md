@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings are read from the widget's entry in the bar configuration the
   shell injects into the service, so the restore after a reload never waits
   for a pill to appear.
+- `reset` (IPC) and the popup's `R` return the timer to idle with no task
+  from any phase, instead of restoring the phase length and staying in the
+  phase: a recorded work session is cancelled first through the same path
+  as `skip` (`todocli pomodoro cancel <uid> --focus-seconds <n>`), a break
+  or an unrecorded work phase records nothing, the state file is written
+  idle and the pill shows the idle glyph. The reply is `reset`, or `idle`
+  when the timer was idle already. The pomodoro count and a pending close
+  are kept. `skip` is unchanged.
 
 ### Added
 

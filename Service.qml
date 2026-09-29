@@ -70,6 +70,7 @@ Item {
   }
 
   // Public API for the widgets (the popup keys and the pill's middle click).
+  // Each is the reducer action its IPC twin dispatches (R = `reset`).
   function toggleTimer() { root.dispatch({ type: "toggle" }) }
   function resetPhase() { root.dispatch({ type: "reset" }) }
   function skipPhase() { root.dispatch({ type: "skip" }) }

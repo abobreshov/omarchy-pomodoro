@@ -17,7 +17,8 @@
 //
 // Phases and their transitions are upstream's (markbus-ai/omarchy-pomodoro):
 // idle → work → short or long break → work (paused) …; skip moves on without
-// counting; reset restores the phase length. Underneath, the fork keeps a
+// counting. Reset deviates (UX 6.2): it abandons the phase and returns to
+// idle with no task, the one way back. Underneath, the fork keeps a
 // wall-clock deadline (`endsAt`) instead of a decrementing tick, treats a gap
 // of more than five seconds between ticks as a pause (suspend), records
 // sessions through todocli when `backend = cli` (Record.js) and checkpoints
@@ -77,6 +78,22 @@ function startPhase(state, cfg, now, phase, run) {
 function attach(state, taskId, label) {
   state.taskId = taskId
   state.taskLabel = label
+}
+
+// Back to `initialState`'s phase fields: no phase, no task, no session. The
+// pomodoro count, a pending close, the record error and the queue stay —
+// they belong to the cycle and to the recording layer, not to the phase.
+function goIdle(state) {
+  state.phase = "idle"
+  state.running = false
+  state.endsAt = null
+  state.remaining = 0
+  state.lastTickAt = null
+  state.focusSeconds = 0
+  state.recorded = false
+  state.restored = false
+  state.sessionUid = null
+  attach(state, "", "")
 }
 
 // The one focus-time rule (A47): while running a work phase, the time since
@@ -283,13 +300,21 @@ function onSkip(state, effects, cfg, now) {
   return "ok"
 }
 
+// `R` / IPC `reset` (UX 6.2, a fork deviation): the phase is abandoned and
+// the machine returns to idle with no task, whatever the phase. A recorded
+// work session is closed as `cancel` with its running seconds through the
+// same path as skip, so todocli sees it; a break or an unrecorded work phase
+// records nothing. The state file is written idle, so the todo panel's
+// markers disappear.
 function onReset(state, effects, cfg, now) {
-  if (state.phase !== "idle") {
+  if (state.phase === "idle") return "idle"
+  if (state.phase === "work") {
     pause(state, now)
-    state.remaining = Phase.phaseSeconds(state.phase, cfg)
-    StateFile.writeState(state, effects, now)
+    Record.enqueueClose(state, effects, cfg, "cancel")
   }
-  return "ok"
+  goIdle(state)
+  StateFile.writeState(state, effects, now)
+  return "reset"
 }
 
 function onDetach(state, effects, cfg, now) {

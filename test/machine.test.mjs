@@ -133,13 +133,13 @@ test("startFor: a non-numeric task id is kept on the timer but recorded by label
 
 // ------------------------------------------------ transport replies (A53)
 
-test("start/pause/resume/reset/skip/detach replies and effects", () => {
+test("start/pause/resume/skip/detach replies and effects", () => {
   const sim = newSim(CLI)
   assert.equal(sim.apply({ type: "pause" }), "idle")
   assert.equal(sim.apply({ type: "detach" }), "idle")
   assert.equal(sim.apply({ type: "resume" }), "idle")
   assert.equal(sim.apply({ type: "skip" }), "ok")
-  assert.equal(sim.apply({ type: "reset" }), "ok")
+  assert.equal(sim.apply({ type: "reset" }), "idle")
   assert.equal(sim.state.phase, "idle")
   assert.equal(sim.records().length, 0)
   assert.equal(sim.apply({ type: "toggle" }), "started")
@@ -159,9 +159,7 @@ test("start/pause/resume/reset/skip/detach replies and effects", () => {
   assert.equal(sim.apply({ type: "pause" }), "paused")
   assert.equal(sim.apply({ type: "resume" }), "resumed")
   sim.tick(5)
-  assert.equal(sim.apply({ type: "reset" }), "ok")
-  assert.equal(sim.state.remaining, 1500)
-  assert.equal(sim.state.running, false)
+  assert.equal(sim.state.remaining, 1485)
   assert.equal(sim.state.focusSeconds, 15)
   assert.equal(sim.apply({ type: "detach" }), "detached")
   sim.clear()
@@ -175,19 +173,179 @@ test("start/pause/resume/reset/skip/detach replies and effects", () => {
   assert.equal(sim.apply({ type: "detach" }), "detached")
 })
 
-test("reset while running pauses at the full phase length; a session keeps its seconds", () => {
+// ------------------------------------------------ reset (UX 6.2, fork)
+
+// Reset abandons the phase from wherever it is: idle, no task, no session,
+// the state file written idle (so the pill shows the idle glyph and the todo
+// panel's markers disappear). A recorded work session is cancelled with its
+// running seconds through the skip path; a break or an unrecorded work
+// phase records nothing. The count and a pending close are kept.
+function assertIdleAfterReset(sim, completed) {
+  const s = sim.state
+  assert.equal(s.phase, "idle")
+  assert.equal(s.running, false)
+  assert.equal(s.endsAt, null)
+  assert.equal(s.remaining, 0)
+  assert.equal(s.taskId, "")
+  assert.equal(s.taskLabel, "")
+  assert.equal(s.sessionUid, null)
+  assert.equal(s.focusSeconds, 0)
+  assert.equal(s.recorded, false)
+  assert.equal(s.restored, false)
+  assert.equal(s.completed, completed)
+  const w = sim.writes()
+  assert.equal(w.length >= 1, true)
+  for (const e of w) {
+    assert.equal(e.doc.phase, "idle")
+    assert.equal(e.doc.running, false)
+    assert.equal(e.doc.taskId, "")
+    assert.equal(e.doc.taskLabel, "")
+    assert.equal(e.doc.sessionUid, null)
+    assert.equal(e.doc.focusSeconds, 0)
+  }
+  const v = T.view(s, sim.cfg)
+  assert.equal(v.hasSession, false)
+  assert.equal(v.phaseGlyph, "")
+  assert.equal(v.tooltip, "Pomodoro — click to start")
+  assert.equal(v.attached, false)
+}
+
+test("reset while idle replies idle and changes nothing", () => {
+  const sim = newSim(CLI)
+  assert.equal(sim.apply({ type: "reset" }), "idle")
+  assert.equal(sim.effects.length, 0)
+  assert.deepEqual(sim.state, T.initialState())
+})
+
+test("reset from running work with a task cancels the session with its seconds and goes idle", () => {
   const sim = newSim(CLI)
   startFor(sim, "3", "Wire it")
-  sim.tick(100)
+  const uid = sim.state.sessionUid
+  sim.tick(300)
   sim.clear()
-  sim.apply({ type: "reset" })
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  const r = sim.records()
+  assert.equal(r.length, 1)
+  assert.equal(r[0].verb, "cancel")
+  assert.equal(r[0].sessionUid, uid)
+  assert.equal(r[0].focusSeconds, 300)
+  assertIdleAfterReset(sim, 0)
+  assert.equal(sim.notifies().length, 0)
+  // Idle is a real idle: ticks do nothing, the next start is a fresh phase.
+  sim.clear()
+  sim.tick(5)
+  assert.equal(sim.effects.length, 0)
+  assert.equal(sim.apply({ type: "toggle" }), "started")
   assert.equal(sim.state.remaining, 1500)
-  assert.equal(sim.state.running, false)
-  assert.equal(sim.records().length, 0)
-  sim.apply({ type: "resume" })
+  assert.equal(sim.state.taskLabel, "")
+  assert.equal(sim.records()[0].verb, "start")
+  assert.equal(sim.records()[0].taskId, "")
+})
+
+test("reset from paused work with a task cancels with the seconds before the pause", () => {
+  const sim = newSim(CLI)
+  startFor(sim, "3", "Wire it")
+  const uid = sim.state.sessionUid
+  sim.tick(100)
+  sim.apply({ type: "pause" })
+  sim.now += 50000
+  sim.clear()
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.deepEqual(sim.verbs(), ["cancel"])
+  assert.equal(sim.records()[0].sessionUid, uid)
+  assert.equal(sim.records()[0].focusSeconds, 100)
+  assertIdleAfterReset(sim, 0)
+  assert.equal(startFor(sim, "4", "Next"), "started")
+})
+
+test("reset from work without a task cancels the unlinked session; an unrecorded work phase records nothing", () => {
+  const sim = newSim(CLI)
+  sim.apply({ type: "toggle" })
+  const uid = sim.state.sessionUid
+  sim.tick(10)
+  sim.clear()
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.deepEqual(sim.verbs(), ["cancel"])
+  assert.equal(sim.records()[0].sessionUid, uid)
+  assert.equal(sim.records()[0].focusSeconds, 10)
+  assertIdleAfterReset(sim, 0)
+  // A break skipped into a paused work phase opened no session: nothing to cancel.
+  const sim2 = newSim(CLI)
+  startFor(sim2, "3", "Wire it")
+  sim2.tick(1500)
+  sim2.apply({ type: "skip" })
+  assert.equal(sim2.state.phase, "work")
+  assert.equal(sim2.state.recorded, false)
+  sim2.clear()
+  assert.equal(sim2.apply({ type: "reset" }), "reset")
+  assert.equal(sim2.records().length, 0)
+  assertIdleAfterReset(sim2, 1)
+})
+
+test("reset from a short break records nothing, drops the task and keeps the count", () => {
+  const sim = newSim(CLI)
+  startFor(sim, "3", "Wire it")
   sim.tick(1500)
-  const done = sim.records().find((e) => e.verb === "done")
-  assert.equal(done.focusSeconds, 1600)
+  assert.equal(sim.state.phase, "shortBreak")
+  sim.tick(30)
+  sim.clear()
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.equal(sim.records().length, 0)
+  assertIdleAfterReset(sim, 1)
+  // The same paused, and without a task.
+  const sim2 = newSim(CLI)
+  sim2.apply({ type: "toggle" })
+  sim2.tick(1500)
+  sim2.apply({ type: "pause" })
+  sim2.clear()
+  assert.equal(sim2.apply({ type: "reset" }), "reset")
+  assert.equal(sim2.records().length, 0)
+  assertIdleAfterReset(sim2, 1)
+})
+
+test("reset from a long break, with and without a task, records nothing and keeps the count", () => {
+  const cfg = T.settings({ backend: "cli", pomodorosPerCycle: 1, workMinutes: 1, longBreakMinutes: 2 })
+  const sim = newSim(cfg)
+  startFor(sim, "3", "Wire it")
+  sim.tick(60)
+  assert.equal(sim.state.phase, "longBreak")
+  sim.clear()
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.equal(sim.records().length, 0)
+  assertIdleAfterReset(sim, 1)
+  const sim2 = newSim(cfg)
+  sim2.apply({ type: "toggle" })
+  sim2.tick(60)
+  sim2.apply({ type: "pause" })
+  sim2.clear()
+  assert.equal(sim2.apply({ type: "reset" }), "reset")
+  assert.equal(sim2.records().length, 0)
+  assertIdleAfterReset(sim2, 1)
+})
+
+test("reset with backend none never records; the record error and a pending close survive a reset", () => {
+  const sim = newSim(T.settings({}))
+  startFor(sim, "3", "Wire it")
+  sim.tick(20)
+  sim.clear()
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.equal(sim.records().length, 0)
+  assertIdleAfterReset(sim, 0)
+  const sim2 = newSim(CLI)
+  startFor(sim2, "3", "Wire it")
+  sim2.tick(10)
+  sim2.answer = () => ({ exitCode: 75 })
+  sim2.clear()
+  assert.equal(sim2.apply({ type: "reset" }), "reset")
+  assert.equal(sim2.state.lastRecordError, "database busy")
+  assert.equal(sim2.state.pendingClose.verb, "cancel")
+  assert.equal(sim2.state.pendingClose.focusSeconds, 10)
+  assertIdleAfterReset(sim2, 0)
+  // The failed reply's write (the harness answers before the reset's own
+  // write is collected) carries the pending close in an idle document.
+  const kept = sim2.writes().find((w) => w.doc.pendingClose !== null)
+  assert.equal(kept.doc.phase, "idle")
+  assert.equal(kept.doc.pendingClose.verb, "cancel")
 })
 
 test("detach during a break clears the label without a record and without focus time", () => {

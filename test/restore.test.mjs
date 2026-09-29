@@ -83,6 +83,36 @@ test("AC-6.20 a stale state closes its own session with the checkpoint", () => {
   assert.equal(T.recordArgv("todocli", r[0]).join(" "), "/usr/bin/env -- todocli --source omarchy --json pomodoro interrupt S --focus-seconds 378")
 })
 
+test("reset after a fresh restore cancels the restored session with its checkpoint; after a stale one it is idle", () => {
+  const sim = newSim(CLI, 1000000 + 40000)
+  sim.restore(SAVED)
+  assert.equal(sim.state.restored, true)
+  sim.clear()
+  assert.equal(sim.apply({ type: "reset" }), "reset")
+  assert.deepEqual(sim.verbs(), ["cancel"])
+  assert.equal(sim.records()[0].sessionUid, "S")
+  assert.equal(sim.records()[0].focusSeconds, 378)
+  assert.equal(sim.state.phase, "idle")
+  assert.equal(sim.state.restored, false)
+  assert.equal(sim.state.taskId, "")
+  assert.equal(sim.state.completed, 2)
+  assert.equal(sim.writes()[0].doc.phase, "idle")
+  assert.equal(sim.writes()[0].doc.sessionUid, null)
+  // A restored break with a label needs no record.
+  const brk = newSim(CLI, 2000000)
+  brk.restore({ version: 1, phase: "longBreak", running: false, endsAt: null, remaining: 100, completed: 4, taskId: "3", taskLabel: "Wire", sessionUid: null, focusSeconds: 0, pendingClose: null, updatedAt: 1999000 })
+  brk.clear()
+  assert.equal(brk.apply({ type: "reset" }), "reset")
+  assert.equal(brk.records().length, 0)
+  assert.equal(brk.state.phase, "idle")
+  assert.equal(brk.state.taskLabel, "")
+  const stale = newSim(CLI, 1000000 + 1122000 + 61000)
+  stale.restore(SAVED)
+  stale.clear()
+  assert.equal(stale.apply({ type: "reset" }), "idle")
+  assert.equal(stale.effects.length, 0)
+})
+
 test("restore: invalid, idle or stale-without-session saved states start idle", () => {
   for (const saved of [null, "", "junk", { version: 2, phase: "work" }, { version: 1, phase: "idle", completed: 3 }, { version: 1, phase: "work", remaining: 10, updatedAt: 0 }, { version: 1, phase: "bogus", remaining: 10, updatedAt: 999999999 }]) {
     const sim = newSim(CLI, 5000000)
