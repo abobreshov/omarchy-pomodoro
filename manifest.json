@@ -1,20 +1,48 @@
 {
   "schemaVersion": 1,
-  "id": "markbusking.pomodoro",
+  "id": "abobreshov.pomodoro",
   "name": "Pomodoro",
-  "version": "0.1.0",
-  "author": "markbusking",
-  "description": "Pomodoro focus timer with work/break phases, progress, and desktop notifications",
+  "version": "1.0.0",
+  "author": "abobreshov",
+  "license": "MIT",
+  "description": "Pomodoro focus timer with work/break phases, progress, desktop notifications, one service-owned timer per session, task attachment over IPC and optional todocli recording",
+  "homepage": "https://github.com/abobreshov/omarchy-pomodoro",
   "kinds": [
+    "service",
     "bar-widget"
   ],
+  "keepLoaded": true,
   "entryPoints": {
-    "barWidget": "Panel.qml"
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Pomodoro",
-    "description": "Focus timer with work, short break, and long break phases",
+    "description": "Focus timer with work, short break, and long break phases; attaches a task from the todo panel",
     "category": "Time",
-    "allowMultiple": false
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "workMinutes": 25,
+      "shortBreakMinutes": 5,
+      "longBreakMinutes": 15,
+      "pomodorosPerCycle": 4,
+      "sound": true,
+      "breakColor": "#a6e3a1",
+      "backend": "none",
+      "cliPath": "todocli",
+      "todoTarget": "abobreshov.todo"
+    },
+    "schema": [
+      { "key": "workMinutes", "type": "integer", "label": "Work minutes", "defaultValue": 25, "min": 1 },
+      { "key": "shortBreakMinutes", "type": "integer", "label": "Short break minutes", "defaultValue": 5, "min": 1 },
+      { "key": "longBreakMinutes", "type": "integer", "label": "Long break minutes", "defaultValue": 15, "min": 1 },
+      { "key": "pomodorosPerCycle", "type": "integer", "label": "Pomodoros per cycle", "defaultValue": 4, "min": 1 },
+      { "key": "sound", "type": "boolean", "label": "Phase-end sounds", "defaultValue": true },
+      { "key": "breakColor", "type": "string", "label": "Break pill colour", "defaultValue": "#a6e3a1" },
+      { "key": "backend", "type": "enum", "label": "Recording: none or cli (todocli)", "defaultValue": "none", "options": ["none", "cli"] },
+      { "key": "cliPath", "type": "string", "label": "todocli command or absolute path", "defaultValue": "todocli" },
+      { "key": "todoTarget", "type": "string", "label": "IPC target opened by a work-end notification", "defaultValue": "abobreshov.todo" }
+    ]
   }
 }
