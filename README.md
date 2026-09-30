@@ -232,7 +232,12 @@ engine does and hides Node's own globals (`process`, `Buffer`, timers,
 left its input state untouched; `test/fakebin/todocli` stands in for the
 real CLI in the recording tests. The test files mirror the modules:
 `phase`, `notify`, `machine`, `queue`, `restore`, `view`, `record` (the fake
-todocli end to end), `timer` (the facade) and `loader`.
+todocli end to end), `timer` (the facade), `loader`, `state-file` (the
+state-file golden the todo plugin vendors) and `contract`
+(`test/fixtures/contract/pomodoro-*.json`, the session objects the real
+todocli prints, vendored from its `tests/fixtures/contract/` and pinned by
+SHA-256; re-vendor by copying the goldens over and pasting the pins the
+test prints).
 
 ## License
 
