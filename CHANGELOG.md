@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against a 60 s phase, retries a transient read-only IPC failure, checks
   `loadedAt` across a restart and prints the status, the records and the
   `qs` log tail when a check fails.
+- `test/qml-js-loader.mjs` is the todo plugin's loader, byte for byte,
+  pinned by SHA-256 in `test/loader.test.mjs`: the pragma and import lines
+  are rewritten at their own length so Node's coverage credits the line a
+  range came from, a library is one shared instance per process as
+  `.pragma library` gives, and a test may inject a qualifier through
+  `imports` without touching the shared instances.
 
 ### Added
 
@@ -67,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across `omarchy plugin update`, so a rollout checks that `omarchy restart
   shell` replaced it: a `loadedAt` older than the update is the previous
   code. The README's Install section carries the three-command rollout.
+- `test/fixtures/state-file.json`: the state file's document as
+  `StateFile.stateFileDoc` writes it for a running work phase, a paused one,
+  a running break and idle, goldened by `test/state-file.test.mjs`
+  (`UPDATE_FIXTURES=1` rewrites it) and round-tripped through
+  `parseStateFile`; the todo plugin vendors and pins these bytes, so the two
+  plugins agree on the contract by the file, not by a comment.
 
 ### Fixed
 

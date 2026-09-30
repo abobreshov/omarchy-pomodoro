@@ -1,0 +1,58 @@
+{
+  "running": {
+    "version": 1,
+    "phase": "work",
+    "running": true,
+    "endsAt": 2500000,
+    "remaining": 1122,
+    "completed": 0,
+    "taskId": "12",
+    "taskLabel": "Write UX spec for the panels",
+    "sessionUid": "S1",
+    "focusSeconds": 378,
+    "pendingClose": null,
+    "updatedAt": 1378000
+  },
+  "paused": {
+    "version": 1,
+    "phase": "work",
+    "running": false,
+    "endsAt": null,
+    "remaining": 1122,
+    "completed": 0,
+    "taskId": "12",
+    "taskLabel": "Write UX spec for the panels",
+    "sessionUid": "S1",
+    "focusSeconds": 378,
+    "pendingClose": null,
+    "updatedAt": 1378000
+  },
+  "break": {
+    "version": 1,
+    "phase": "shortBreak",
+    "running": true,
+    "endsAt": 1678000,
+    "remaining": 300,
+    "completed": 0,
+    "taskId": "12",
+    "taskLabel": "Write UX spec for the panels",
+    "sessionUid": null,
+    "focusSeconds": 0,
+    "pendingClose": null,
+    "updatedAt": 1378000
+  },
+  "idle": {
+    "version": 1,
+    "phase": "idle",
+    "running": false,
+    "endsAt": null,
+    "remaining": 0,
+    "completed": 0,
+    "taskId": "",
+    "taskLabel": "",
+    "sessionUid": null,
+    "focusSeconds": 0,
+    "pendingClose": null,
+    "updatedAt": 1378000
+  }
+}

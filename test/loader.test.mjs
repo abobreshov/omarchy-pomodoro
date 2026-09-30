@@ -2,13 +2,18 @@
 // Node-only call (process, Buffer, timers, fetch, require) fails under the
 // unit tests exactly as it would in a QML JavaScript context (A28), and it
 // resolves `.import "Other.js" as Name` between libraries the way the QML
-// engine does: relative to the importing file, one shared instance.
+// engine does: relative to the importing file, one shared instance per
+// process. The file is the todo plugin's tests/qml-js-loader.mjs, vendored
+// byte for byte and pinned here by SHA-256.
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { loadQmlJs } from "./qml-js-loader.mjs"
+
+const LOADER_SHA256 = "dfb87cdd76e349406e946762a5a14abdaa41d50c935e41d1e4d9830afe8ac643"
 
 const PROBE = [
   ".pragma library",
@@ -74,13 +79,35 @@ test(".import \"file.js\" as Name resolves relative to the importer as one share
   assert.deepEqual(Object.keys(Top).sort(), ["CONST", "hasQ", "sameLeaf", "thrice", "twice", "wrapped"])
 })
 
-test("a library loaded on its own and one reached through an importer are separate loads; line numbers survive the import lines", () => {
+test("a library is one shared instance per process, loaded on its own or through an importer; line numbers survive the import lines", () => {
   const dir = writeTree()
   const Leaf = loadQmlJs(path.join(dir, "Leaf.qmljs"))
   const Mid = loadQmlJs(path.join(dir, "Mid.qmljs"))
-  assert.notEqual(Mid.leaf(), Leaf, "each top-level load has its own cache, like a fresh QML engine")
-  assert.deepEqual(Mid.leaf().TABLE, Leaf.TABLE)
+  assert.equal(Mid.leaf(), Leaf, "`.pragma library` is one instance per engine; the loader keeps one per process")
+  assert.equal(loadQmlJs(path.join(dir, "Leaf.qmljs")), Leaf, "a second load answers the shared instance")
   let stack = ""
   try { Mid.throwsHere() } catch (e) { stack = e.stack }
   assert.match(stack, new RegExp(path.join(dir, "Mid.qmljs").replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ":5:"))
+})
+
+test("a qualifier handed in `imports` replaces the file's, and such a load stays out of the shared table", () => {
+  const dir = writeTree()
+  const fake = { twice: (n) => n * 10 }
+  const Mid = loadQmlJs(path.join(dir, "Mid.qmljs"), { Leaf: fake })
+  assert.equal(Mid.leaf(), fake)
+  assert.equal(Mid.thrice(3), 33)
+  const shared = loadQmlJs(path.join(dir, "Mid.qmljs"))
+  assert.notEqual(shared, Mid, "the injected load is not what a plain load answers")
+  assert.equal(shared.thrice(3), 9, "the plain load imports Leaf from the file")
+})
+
+test("a file that does not start with `.pragma library` is refused", () => {
+  const file = path.join(writeTree(), "Plain.qmljs")
+  fs.writeFileSync(file, "var x = 1\n")
+  assert.throws(() => loadQmlJs(file), /line 1 must be `\.pragma library`/)
+})
+
+test("the loader is the todo plugin's, byte for byte: re-vendor omarchy-todo/tests/qml-js-loader.mjs and paste the pin", () => {
+  const pin = createHash("sha256").update(fs.readFileSync(new URL("./qml-js-loader.mjs", import.meta.url))).digest("hex")
+  assert.equal(pin, LOADER_SHA256, "test/qml-js-loader.mjs drifted from the pin; new pin: " + pin)
 })
